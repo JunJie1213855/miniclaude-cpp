@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 #include "core/Message.h"
@@ -7,13 +8,14 @@
 namespace aicoder
 {
   class SkillRegistry;
+  using SessionsCallback = std::function<void()>;
+
   enum class CommandResult
   {
     Quit,
     Cleared,
     Prompt,
     Reloaded, // /reload-skills 命中；CommandOutcome::prompt 是给用户看的状态提示
-    Sessions, // /sessions：查看并切换历史会话
     NotACommand
   };
   struct CommandOutcome
@@ -36,11 +38,13 @@ namespace aicoder
                   std::filesystem::path skillProjectDir = {});
     CommandOutcome handle(const std::string &input, std::vector<Message> &messages) const;
     std::vector<CommandInfo> commands() const;
+    void setSessionsCallback(SessionsCallback cb) { sessionsCallback_ = std::move(cb); }
 
   private:
     CommandRegistry registry_;
     SkillRegistry *skills_ = nullptr; // 非 const：/reload-skills 需要调 discover
     std::filesystem::path skillGlobalDir_;
     std::filesystem::path skillProjectDir_;
+    SessionsCallback sessionsCallback_;
   };
 }

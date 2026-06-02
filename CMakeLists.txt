@@ -71,7 +71,6 @@ add_executable(aicoder_tui "${PROJECT_SOURCE_DIR}/src/main.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/App.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp"
-                          "${PROJECT_SOURCE_DIR}/src/ui/SessionPicker.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp")
 target_link_libraries(aicoder_tui PRIVATE aicoder_core ftxui::component)
 target_include_directories(aicoder_tui PRIVATE "${PROJECT_SOURCE_DIR}/src")

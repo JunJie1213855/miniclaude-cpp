@@ -716,6 +716,9 @@ namespace aicoder
     std::vector<std::pair<std::string, std::string>> commands_; // data-driven slash commands
     int compIndex_ = 0;                                         // 命令补全菜单当前选中项
     int cursorPos_ = 0;                                         // 绑定到 Input 的光标位置，补全后同步到末尾
+    std::chrono::steady_clock::time_point lastCtrlCTime_;
+    bool ctrlCWarning_ = false;
+    ReplView::ExitRequestedCallback onExitRequested_;
     std::weak_ptr<Impl> self_;
     SubmitCallback onSubmit_;
 
@@ -919,8 +922,17 @@ namespace aicoder
       // 状态提示行：模式标签单独一行、靠左对齐（前置空格留点边距）。下方不再加分隔线，
       // 状态行即一个独立的单行容器，直接紧贴 App 外边框。
       // 反思=绿色加粗、计划=青色加粗、普通=变暗。
+      // Ctrl+C 警告超时自动清除
+      if (ctrlCWarning_) {
+        auto elapsed = std::chrono::steady_clock::now() - lastCtrlCTime_;
+        if (elapsed >= std::chrono::seconds(2))
+          ctrlCWarning_ = false;
+      }
       ftxui::Element modeTag;
-      if (mode_ == ChatMode::Reflection)
+      if (ctrlCWarning_) {
+        modeTag = ftxui::text(" 如果用户要退出，请再次点击 Ctrl+C ")
+                  | ftxui::bold | ftxui::color(ftxui::Color::Red);
+      } else if (mode_ == ChatMode::Reflection)
         modeTag = ftxui::text(" [反思] Tab切换") | ftxui::bold |
                   ftxui::color(ftxui::Color::Green);
       else if (mode_ == ChatMode::PlanExecute)
@@ -988,6 +1000,17 @@ namespace aicoder
         mode_ = (mode_ == ChatMode::Normal)     ? ChatMode::Reflection
                 : (mode_ == ChatMode::Reflection) ? ChatMode::PlanExecute
                                                   : ChatMode::Normal;
+        return true;
+      }
+      if (e == ftxui::Event::CtrlC) {
+        auto now = std::chrono::steady_clock::now();
+        if (ctrlCWarning_ && (now - lastCtrlCTime_) < std::chrono::seconds(2)) {
+          if (onExitRequested_) onExitRequested_();
+          return true;
+        }
+        lastCtrlCTime_ = now;
+        ctrlCWarning_ = true;
+        if (screen) screen->PostEvent(ftxui::Event::Custom);
         return true;
       }
       if (e == ftxui::Event::ArrowUp || e == ftxui::Event::PageUp) {
@@ -1249,6 +1272,11 @@ namespace aicoder
   void ReplView::setModel(const std::string& model)
   {
     impl_->model_ = model;
+  }
+
+  void ReplView::setOnExitRequested(ExitRequestedCallback cb)
+  {
+    impl_->onExitRequested_ = std::move(cb);
   }
 
   bool ReplView::askPermission(const std::string &toolName, const json &input)

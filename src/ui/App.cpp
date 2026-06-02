@@ -9,7 +9,7 @@
 #include "llm/StreamDelta.h"
 #include "sessions/Session.h"
 #include "sessions/SessionStore.h"
-#include "ui/SessionPicker.h"
+#include "ui/ResumePicker.h"
 #include "util/ThreadPool.h"
 #include "ftxui/screen/screen.hpp"
 #include "ftxui/component/component.hpp"
@@ -105,6 +105,15 @@ namespace aicoder
       cancel_ = std::make_shared<std::atomic<bool>>(false);
       taskRunning_ = std::make_shared<std::atomic<bool>>(false);
       agentLoop.setCancelToken(cancel_);
+
+      replView.setOnExitRequested([this] {
+        // 安全退出：保存会话后关闭 TUI
+        cancel_->store(true);
+        saveTurn();
+        screen.Exit();
+      });
+
+      router.setSessionsCallback([this] { onSessionsCommand(); });
     }
 
     void saveTurn() {
@@ -118,6 +127,39 @@ namespace aicoder
       d.created_at = existing ? existing->created_at : now;
       d.updated_at = now;
       store.save(sessionId_, d);
+    }
+
+    void onSessionsCommand()
+    {
+      bool wasRunning = taskRunning_->load();
+      if (wasRunning) {
+        cancel_->store(true);
+        for (int i = 0; i < 120 && taskRunning_->load(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      saveTurn();
+      auto newId = showResumePicker(this->store, this->sessionId_);
+      if (newId && *newId != this->sessionId_) {
+        auto data = this->store.load(*newId);
+        this->sessionId_ = *newId;
+        this->messages.clear();
+        this->replView.clearMessages();
+        if (data) {
+          this->messages = std::move(data->messages);
+          for (const auto& msg : this->messages) {
+            if (msg.role == Role::User) {
+              this->replView.appendMessage(UIMessage{assistantText(msg), true, false});
+            } else if (msg.role == Role::Assistant) {
+              std::string text = assistantText(msg);
+              if (!text.empty())
+                this->replView.appendMessage(UIMessage{text, false, false});
+            }
+          }
+        }
+        this->replView.appendMessage(UIMessage{"[已切换到会话 " + *newId + "]", false, false});
+      }
+      if (!taskRunning_->load())
+        cancel_->store(false);
     }
 
     void onSubmit(const std::string &input)
@@ -134,46 +176,6 @@ namespace aicoder
         saveTurn();
         replView.clearMessages(); // 清屏（messages_ 与对话历史分开存储，需单独清）
         replView.appendMessage({"[对话已清空]", false, false});
-        return;
-      }
-      if (outcome.result == CommandResult::Sessions)
-      {
-        // 取消正在运行的 AgentLoop 任务并等待 worker 退出。
-        // 直接轮询 taskRunning_（不用 [&] syncDone —— 若超时则引用悬空）。
-        bool wasRunning = taskRunning_->load();
-        if (wasRunning) {
-          cancel_->store(true);
-          for (int i = 0; i < 120 && taskRunning_->load(); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        // 保存当前会话
-        saveTurn();
-        // 弹窗选择
-        auto newId = showSessionPicker(store, sessionId_);
-        if (newId && *newId != sessionId_) {
-          // 加载新会话并回放到 UI
-          auto data = store.load(*newId);
-          sessionId_ = *newId;
-          messages.clear();
-          replView.clearMessages();
-          if (data) {
-            messages = std::move(data->messages);
-            for (const auto& msg : messages) {
-              if (msg.role == Role::User) {
-                replView.appendMessage({assistantText(msg), true, false});
-              } else if (msg.role == Role::Assistant) {
-                std::string text = assistantText(msg);
-                if (!text.empty())
-                  replView.appendMessage({text, false, false});
-              }
-            }
-          }
-          replView.appendMessage({"[已切换到会话 " + *newId + "]", false, false});
-        }
-        // 仅在 worker 确认已退出时复位 cancel；若仍在跑则不碰（防止它
-        // 读到 false 后继续写 messages 污染新会话数据）。
-        if (!taskRunning_->load())
-          cancel_->store(false);
         return;
       }
       if (outcome.result == CommandResult::Reloaded)
@@ -261,7 +263,9 @@ namespace aicoder
                                       { return root->Render()
                                             // | ftxui::border
                                             ; });
-    impl_->screen.Loop(withBorder);
+    // 禁止 FTXUI 强制接管 Ctrl+C：由 ReplView::CatchEvent 实现双击退出。
+    impl_->screen.ForceHandleCtrlC(false);
+    impl_->screen.Loop(withBorder); // 循环渲染
   }
 
 }

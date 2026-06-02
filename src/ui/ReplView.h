@@ -52,6 +52,9 @@ namespace aicoder
     // 设置当前模型名（供 welcome 页展示）。
     void setModel(const std::string& model);
 
+    using ExitRequestedCallback = std::function<void()>;
+    void setOnExitRequested(ExitRequestedCallback cb);
+
     // 权限询问：worker 线程调此方法等待用户批准（同步阻塞）
     // 内部 Post 到 UI 线程弹出 PermissionDialog,等待用户选 Allow / AllowForever / Deny。
     // 选 AllowForever 时,回调 onAllowForever(toolName, input) 会被调用
