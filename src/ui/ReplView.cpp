@@ -761,10 +761,8 @@ namespace aicoder
       ftxui::Elements els;
       totalLines_ = 0;  // 重置总行数计数
 
-      // Show welcome screen if no messages yet
-      if (messages_.empty()) {
-        els.push_back(welcomeScreen());
-      }
+      // Welcome 屏不在这里 push(原行为:仅 messages_.empty() 时显示,用户敲字时让位)。
+      // 改为:welcome 作为 layout 顶层固定项,消息滚动时不被覆盖。
 
       for (const auto& m : messages_) {
         if (m.is_user) {
@@ -863,6 +861,10 @@ namespace aicoder
                            ftxui::focusPositionRelative(0.0f, scroll_pos_) |
                            ftxui::yframe | ftxui::flex;
       ftxui::Elements layout;
+      // Welcome 屏:与消息区并列,固定在 layout 顶部,不随消息滚动消失。
+      // 输入和输出消息时,welcome 屏保持显示。
+      layout.push_back(welcomeScreen() | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 14));
+      layout.push_back(ftxui::separator());
       layout.push_back(messages_area);
       layout.push_back(ftxui::separator());  // 上分隔线
       // 命令补全菜单：输入以 / 开头时浮现在输入框上方，↑↓ 选择，Tab 补全。
@@ -911,6 +913,8 @@ namespace aicoder
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
                                     {
       if (permissionPending_) {
+        // 权限弹窗期间只拦截 y/n,其余事件放行
+        // —— 这样用户仍能在输入框继续打字,文字不会"被吞"或"被隐藏"。
         if (e == ftxui::Event::Character('y') || e == ftxui::Event::Character('Y')) {
           grantPermission(true);
           return true;
@@ -919,7 +923,7 @@ namespace aicoder
           grantPermission(false);
           return true;
         }
-        return true;
+        return false;  // 放行到 input,继续累加 input_text_
       }
       // 命令补全激活时（输入以 / 开头且有候选）：拦截上下/Tab/Enter。
       {
