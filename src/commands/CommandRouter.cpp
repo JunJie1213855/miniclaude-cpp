@@ -91,6 +91,7 @@ namespace aicoder
     std::vector<CommandInfo> out = {
         {"/quit", "退出"},
         {"/clear", "清空对话"},
+        {"/sessions", "查看并切换历史会话"},
         {"/reload-skills", "重新加载技能"}};
     for (const auto &t : registry_.list())
       out.push_back({"/" + t.name, t.description});

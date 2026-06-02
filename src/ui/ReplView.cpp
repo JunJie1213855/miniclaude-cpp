@@ -1003,6 +1003,11 @@ namespace aicoder
         return true;
       }
       if (e == ftxui::Event::CtrlC) {
+        // 优先让 Input 处理 Ctrl+C：有选中文本时执行复制到剪贴板。
+        // Input::OnEvent 无副作用——有选中 → 复制并返回 true；无选中 → 返回 false。
+        if (input->OnEvent(e))
+          return true;
+        // Input 无选中文本 → 双击退出逻辑
         auto now = std::chrono::steady_clock::now();
         if (ctrlCWarning_ && (now - lastCtrlCTime_) < std::chrono::seconds(2)) {
           if (onExitRequested_) onExitRequested_();
