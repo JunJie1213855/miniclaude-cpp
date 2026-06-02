@@ -7,10 +7,12 @@ public:
   HttpTransport();   // 首次构造时一次性 curl_global_init
   HttpResponse post(const std::string& url,
                     const std::string& body,
-                    const std::vector<std::string>& headers) override;
+                    const std::vector<std::string>& headers,
+                    const std::atomic<bool>* cancel = nullptr) override;
   HttpResponse postStream(const std::string& url,
                           const std::string& body,
                           const std::vector<std::string>& headers,
-                          const ChunkCallback& onChunk) override;
+                          const ChunkCallback& onChunk,
+                          const std::atomic<bool>* cancel = nullptr) override;
 };
 }

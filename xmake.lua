@@ -50,7 +50,7 @@ target("aicoder_core")
 -- TUI 可执行文件
 target("aicoder")
     set_kind("binary")
-    add_files("src/main_tui.cpp",
+    add_files("src/main.cpp",
              "src/ui/App.cpp",
              "src/ui/ReplView.cpp",
              "src/ui/ResumePicker.cpp",

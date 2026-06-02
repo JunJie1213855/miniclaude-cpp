@@ -16,6 +16,22 @@ namespace aicoder
                                         const std::vector<ToolSpec> &tools,
                                         const DeltaCallback &onDelta)
   {
+    return doSendStream(messages, tools, onDelta, nullptr);
+  }
+
+  Response DefaultLlmClient::sendStream(const std::vector<Message> &messages,
+                                        const std::vector<ToolSpec> &tools,
+                                        const DeltaCallback &onDelta,
+                                        const std::atomic<bool> *cancel)
+  {
+    return doSendStream(messages, tools, onDelta, cancel);
+  }
+
+  Response DefaultLlmClient::doSendStream(const std::vector<Message> &messages,
+                                          const std::vector<ToolSpec> &tools,
+                                          const DeltaCallback &onDelta,
+                                          const std::atomic<bool> *cancel)
+  {
     json reqBody = provider_->encodeRequest(messages, tools, config_.model);
     reqBody["stream"] = true;
     std::string url = config_.base_url + "/chat/completions";
@@ -29,7 +45,8 @@ namespace aicoder
         [&](const std::string &chunk)
         {
           parser.feed(chunk, onDelta);
-        });
+        },
+        cancel);  // 透传 cancel(可能 nullptr)
 
     if (resp.status < 200 || resp.status >= 300)
       throw LlmError("HTTP " + std::to_string(resp.status) + ": " + resp.body);

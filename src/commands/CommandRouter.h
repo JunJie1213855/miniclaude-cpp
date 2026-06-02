@@ -12,13 +12,13 @@ namespace aicoder
     Quit,
     Cleared,
     Prompt,
-    Reloaded,  // /reload-skills 命中；CommandOutcome::prompt 是给用户看的状态提示
+    Reloaded, // /reload-skills 命中；CommandOutcome::prompt 是给用户看的状态提示
     NotACommand
   };
   struct CommandOutcome
   {
     CommandResult result;
-    std::string prompt;  // Prompt: 发给模型的展开文本；Reloaded: 给用户看的状态信息
+    std::string prompt; // Prompt: 发给模型的展开文本；Reloaded: 给用户看的状态信息
   };
   struct CommandInfo
   {
@@ -38,7 +38,7 @@ namespace aicoder
 
   private:
     CommandRegistry registry_;
-    SkillRegistry *skills_ = nullptr;  // 非 const：/reload-skills 需要调 discover
+    SkillRegistry *skills_ = nullptr; // 非 const：/reload-skills 需要调 discover
     std::filesystem::path skillGlobalDir_;
     std::filesystem::path skillProjectDir_;
   };

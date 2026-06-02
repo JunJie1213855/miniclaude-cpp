@@ -1,6 +1,5 @@
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include "commands/CommandRegistry.h"
 #include "commands/CommandRouter.h"
 #include "config/Config.h"
@@ -11,15 +10,42 @@
 #include "llm/HttpTransport.h"
 #include "llm/OpenAIProvider.h"
 #include "rules/Rules.h"
+#include "sessions/CliArgs.h"
+#include "sessions/SessionStore.h"
 #include "skills/SkillRegistry.h"
 #include "skills/SkillTool.h"
 #include "tools/BuiltinTools.h"
-#include "ui/ConsoleRepl.h"
+#include "ui/App.h"
+#include "ui/ResumePicker.h"
 #include "workspace/Workspace.h"
 
 using namespace aicoder;
 
-int main() {
+int main(int argc, char** argv) {
+  auto args = parseCliArgs(argc, argv);
+  if (!args) {
+    std::cerr << kUsage;
+    return 2;
+  }
+
+  // --list-sessions：不进 TUI、不需要 API key，列完即退。删除请手动 rm -rf。
+  if (args->mode == CliMode::ListSessions) {
+    SessionStore store(globalDir() / "sessions");
+    auto sessions = store.listSessions();
+    if (sessions.empty()) {
+      std::cout << "(no sessions in " << store.root().string() << ")\n";
+    } else {
+      std::cout << "Sessions in " << store.root().string() << ":\n";
+      for (const auto& s : sessions) {
+        std::cout << "  " << s.id << "  " << s.updated_at
+                  << "  [" << s.message_count << " 条]  "
+                  << (s.preview.empty() ? "(无预览)" : s.preview) << "\n";
+      }
+      std::cout << "\nDelete with: rm -rf " << store.root().string() << "/<id>\n";
+    }
+    return 0;
+  }
+
   Config config;
   try {
     config = Config::fromEnv();
@@ -52,7 +78,34 @@ int main() {
       loadRules(globalDir(), std::filesystem::current_path()),
       skillReg.promptList());
 
-  ConsoleRepl repl(loop, router, systemPrompt);
-  repl.run();
+  SessionStore sessionStore(globalDir() / "sessions");
+  std::string sessionId;
+  std::vector<Message> initialMessages;
+
+  if (args->mode == CliMode::ContinueLatest) {
+    if (auto id = sessionStore.latestId()) {
+      sessionId = *id;
+      if (auto data = sessionStore.load(*id)) initialMessages = std::move(data->messages);
+      else { std::cerr << "[会话已损坏，开新会话]\n"; sessionId = sessionStore.newId(); }
+    } else {
+      std::cerr << "[未找到历史会话，开始新会话]\n";
+      sessionId = sessionStore.newId();
+    }
+  } else if (args->mode == CliMode::ResumePicker) {
+    auto picked = showResumePicker(sessionStore);
+    if (picked) {
+      sessionId = *picked;
+      if (auto data = sessionStore.load(*picked)) initialMessages = std::move(data->messages);
+      else { std::cerr << "[会话已损坏，开新会话]\n"; sessionId = sessionStore.newId(); }
+    } else {
+      sessionId = sessionStore.newId();
+    }
+  } else {
+    sessionId = sessionStore.newId();
+  }
+
+  App app(loop, router, systemPrompt, sessionStore, sessionId,
+          std::move(initialMessages), config.model);
+  app.run();
   return 0;
 }

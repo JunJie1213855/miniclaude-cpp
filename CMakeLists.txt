@@ -21,14 +21,13 @@ find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 
 # --- FTXUI -----------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-  ftxui
-  GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui.git
-  GIT_TAG v6.1.9
-  GIT_PROGRESS TRUE
-)
-FetchContent_MakeAvailable(ftxui)
+# ftxui 已 vendored 到 third_party/ftxui/(含 CJK 光标修复 + 删测试/示例)。
+# 不走 FetchContent,直接 add_subdirectory,免网络拉取,确保 build 完全可复现。
+set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/ftxui)
 
 find_package(GTest REQUIRED)
 enable_testing()
@@ -47,10 +46,11 @@ else()
 endif()
 message(STATUS "nlohmann/json include: ${NLOHMANN_JSON_INCLUDE}")
 
-# 核心库 = src 下除 main.cpp、main_tui.cpp、ui/App.cpp、ui/ReplView.cpp 外的所有 .cpp
+# 核心库 = src 下除 main.cpp、ui/App.cpp、ui/ReplView.cpp 外的所有 .cpp
+# (main.cpp 是 TUI 程序入口;其余 UI 入口 App.cpp/ReplView.cpp/ResumePicker.cpp/
+#  Welcome.cpp/PermissionDialog.cpp 通过 add_executable 单独编译)
 file(GLOB_RECURSE AICODER_LIB_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/main.cpp")
-list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/main_tui.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/App.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp")
@@ -63,15 +63,11 @@ target_include_directories(aicoder_core BEFORE PUBLIC
 target_link_libraries(aicoder_core PUBLIC CURL::libcurl Threads::Threads)
 # PermissionDialog.h is included by sources compiled into aicoder_core and pulls in
 # ftxui/dom/elements.hpp, so FTXUI's include path must reach aicoder_core's own TUs.
-# PUBLIC propagates the include path to both aicoder_core and its link dependents
-# (aicoder, aicoder_tui).
+# PUBLIC propagates the include path to aicoder_tui (the only link dependent now).
 target_link_libraries(aicoder_core PUBLIC ftxui::component)
 
-add_executable(aicoder "${PROJECT_SOURCE_DIR}/src/main.cpp")
-target_link_libraries(aicoder PRIVATE aicoder_core)
-
-# SP1b: TUI 可执行（依赖 aicoder_core + FTXUI）
-add_executable(aicoder_tui "${PROJECT_SOURCE_DIR}/src/main_tui.cpp"
+# TUI 可执行(依赖 aicoder_core + FTXUI) —— 唯一可执行入口
+add_executable(aicoder_tui "${PROJECT_SOURCE_DIR}/src/main.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/App.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp"

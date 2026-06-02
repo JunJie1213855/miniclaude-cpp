@@ -47,12 +47,18 @@ namespace aicoder
     // 可选:在执行每个工具后回调,供 UI 上报。失败/拒绝也会调用。
     using StepReporter = std::function<void(const ToolUseBlock &, const ToolResultBlock &)>;
 
+    // 弹窗间让出:连续两个 asker 调用之间插入的回调(无参)。
+    // 默认空(=不延迟)。UI 层可注入:让屏幕重绘一帧、丢弃键盘缓冲、
+    // 短暂 sleep,避免 Enter 残留在下一个弹窗上误触。
+    using BetweenAsksYield = std::function<void()>;
+
     void setExecutor(Executor e) { executor_ = std::move(e); }
     void setAsker(Asker a) { asker_ = std::move(a); }
     void setAllowForeverHook(AllowForeverHook h) { allowForeverHook_ = std::move(h); }
     void setAllowLookup(AllowLookup l) { allowLookup_ = std::move(l); }
     void setMetaLookup(MetaLookup m) { metaLookup_ = std::move(m); }
     void setStepReporter(StepReporter r) { stepReporter_ = std::move(r); }
+    void setBetweenAsksYield(BetweenAsksYield y) { betweenAsksYield_ = std::move(y); }
 
     // 顺序处理 LLM 一次性返回的 N 个 ToolUseBlock。
     // 中断逻辑:任一工具被 Deny(用户拒绝)或执行返回 is_error=true,队列立刻终止,
@@ -65,9 +71,10 @@ namespace aicoder
     Executor executor_;
     Asker asker_;
     AllowForeverHook allowForeverHook_;
-    AllowLookup allowLookup_;   // 可选,默认 = 不命中任何规则
-    MetaLookup metaLookup_;     // 可选,默认 = needsPermission=false
-    StepReporter stepReporter_; // 可选
+    AllowLookup allowLookup_;       // 可选,默认 = 不命中任何规则
+    MetaLookup metaLookup_;         // 可选,默认 = needsPermission=false
+    StepReporter stepReporter_;     // 可选
+    BetweenAsksYield betweenAsksYield_; // 可选,弹窗间让出
   };
 
 } // namespace aicoder

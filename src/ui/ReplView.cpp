@@ -1024,6 +1024,17 @@ namespace aicoder
         allowForeverCallback_(permissionRequest_.tool_name, permissionRequest_.input);
       permissionPending_ = false;
       permissionCv_.notify_one();
+      // 关键:通知 worker 之前,先让 TUI 线程把"input 框已恢复"这一帧
+      // 渲染完,再让出。避免 worker 立即再投递下一个 dialog 抢占键盘。
+      // screen_ 非空(在主会话里)就 Post 一帧重绘事件。
+      if (screen)
+      {
+        screen->PostEvent(ftxui::Event::Custom);
+        // 小延迟让 TUI 事件循环跑一次 render。
+        // 这一行阻塞 TUI 线程约 30ms,对用户来说几乎无感(Enter 后短暂停滞)
+        // 但足以让 input 框可见 1 帧,并丢弃堆积的键盘事件。
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
     }
 
     // 当前输入对应的命令补全候选；返回空 = 不显示补全菜单。

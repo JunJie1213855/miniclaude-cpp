@@ -139,3 +139,42 @@ TEST(ToolInterceptor, AllowForeverInvokesHook) {
   EXPECT_EQ(foreverLog[0].first, "Bash");
   EXPECT_EQ(foreverLog[0].second["command"], "cmake -S . -B build");
 }
+
+TEST(ToolInterceptor, BetweenAsksYieldRunsOncePerAskerCall) {
+  // 关键回归:连续多个 needsPermission 工具时,yield 必须在每次 asker
+  // 之前被调用,避免第二个弹窗被第一个 Enter 穿透。
+  ToolInterceptor ic;
+  int yieldCount = 0;
+  ic.setMetaLookup([](const std::string &) { return ToolMeta{"Bash", true}; });
+  ic.setBetweenAsksYield([&] { ++yieldCount; });
+  ic.setAsker([](const ToolUseBlock &, const std::string &) { return AskResult::Allow; });
+  ic.setExecutor([&](const ToolUseBlock &tu) { return ToolResultBlock{tu.id, "ok", false}; });
+
+  std::vector<ToolUseBlock> queue = {
+      mk("a", "Bash", json::object()),
+      mk("b", "Bash", json::object()),
+      mk("c", "Bash", json::object()),
+  };
+  auto out = ic.intercept(queue);
+  ASSERT_EQ(out.size(), 3u);
+  for (const auto& r : out) EXPECT_FALSE(r.is_error);
+  // 3 个 tool 都需 asker,→ 3 次 yield
+  EXPECT_EQ(yieldCount, 3);
+}
+
+TEST(ToolInterceptor, BetweenAsksYieldNotCalledForReadOnlyTools) {
+  // 不需权限的工具(如 Read)不弹窗,不该触发 yield。
+  ToolInterceptor ic;
+  int yieldCount = 0;
+  ic.setMetaLookup([](const std::string &) { return ToolMeta{"Read", false}; });
+  ic.setBetweenAsksYield([&] { ++yieldCount; });
+  ic.setExecutor([&](const ToolUseBlock &tu) { return ToolResultBlock{tu.id, "ok", false}; });
+  std::vector<ToolUseBlock> queue = {
+      mk("a", "Read", json::object()),
+      mk("b", "Read", json::object()),
+  };
+  auto out = ic.intercept(queue);
+  EXPECT_EQ(yieldCount, 0);
+  EXPECT_FALSE(out[0].is_error);
+  EXPECT_FALSE(out[1].is_error);
+}

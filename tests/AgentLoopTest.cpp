@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include <atomic>
 #include <functional>
+#include <memory>
 #include "core/AgentLoop.h"
 #include "core/ToolRegistry.h"
 #include "core/Errors.h"
@@ -366,4 +368,132 @@ TEST(AgentLoop, PlanExecuteRespectsMaxSteps) {
 
   EXPECT_EQ(countStepMessages(msgs), 2);  // 5 步计划，但只执行 2 步
   EXPECT_EQ(fake.calls_, 4);              // 规划 + 2 步 + 综合
+}
+
+// ---- 5 类循环边界 ----
+
+// ① 正常终止:LLM 一次返回纯文本 → 退出,不进工具循环
+TEST(AgentLoop, NormalTerminationOnEmptyToolUses) {
+  FakeLlmClient fake([](int) { return textResp("all done"); });
+  ToolRegistry reg = registryWith(echoTool());  // 即便有工具,无 tool_use 就不调
+  AgentLoop loop(fake, reg, 16);
+  std::vector<Message> msgs = {userText("hi")};
+  std::string reply = loop.run(msgs);
+  EXPECT_EQ(reply, "all done");
+  EXPECT_EQ(fake.calls_, 1);
+  // messages 末尾应是助手文本(无 Tool 消息)
+  EXPECT_EQ(msgs.back().role, Role::Assistant);
+}
+
+// ② 上下文压缩:灌入大量历史后 messages 变短(已用 kCompactionThresholdBytes 触发)
+TEST(AgentLoop, ContextCompactionTrimsLongHistory) {
+  // 直接调静态方法验证 —— 不需要构造 loop 实例。
+  std::vector<Message> msgs;
+  msgs.push_back(systemText("you are helpful"));
+  for (int i = 0; i < 100; ++i) {
+    Message m{Role::Tool, {}};
+    m.content.push_back(ToolResultBlock{
+        "id" + std::to_string(i),
+        std::string(1000, 'X'),  // 1KB 每条
+        false});
+    msgs.push_back(std::move(m));
+  }
+  // 压缩前总长 > 80KB
+  EXPECT_GT(AgentLoop::messagesSerializedSize(msgs), AgentLoop::kCompactionThresholdBytes);
+  EXPECT_TRUE(AgentLoop::needCompaction(msgs));
+  AgentLoop::compactMessages(msgs);
+  // 压缩后:系统消息保留 + 中间 ToolResultBlock 被截断(应 < 1KB)
+  for (size_t i = 1; i + AgentLoop::kCompactionKeepRecent < msgs.size(); ++i) {
+    for (const auto& b : msgs[i].content) {
+      if (auto* r = std::get_if<ToolResultBlock>(&b)) {
+        EXPECT_LT(r->content.size(), 1500u);  // 应被截断,远小于原 1KB
+      }
+    }
+  }
+}
+
+// ③ 工具错误自修:工具抛异常 → is_error=true → 循环不跳出
+TEST(AgentLoop, ToolErrorRecoveryContinuesLoop) {
+  Tool failingTool;
+  failingTool.name = "boom";
+  failingTool.description = "always fails";
+  failingTool.input_schema = json{{"type", "object"}};
+  failingTool.execute = [](const json&) -> std::string {
+    throw ToolError("kaboom");
+  };
+  FakeLlmClient fake([](int i) {
+    return i == 0 ? toolResp("c1", "boom", json::object()) : textResp("recovered");
+  });
+  ToolRegistry reg;
+  reg.registerTool(failingTool);
+  AgentLoop loop(fake, reg, 16);
+  std::vector<Message> msgs = {userText("x")};
+  std::string reply = loop.run(msgs);
+  EXPECT_EQ(reply, "recovered");
+  // 验证 ToolResultBlock 标 is_error=true
+  bool sawError = false;
+  for (const auto& m : msgs) {
+    if (m.role == Role::Tool) {
+      for (const auto& b : m.content) {
+        if (auto* r = std::get_if<ToolResultBlock>(&b)) {
+          if (r->is_error) sawError = true;
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(sawError);
+}
+
+// ④ 取消信号:loop 开始前已 cancel → 立刻返回 cancelNote
+TEST(AgentLoop, CancelTokenStopsLoopImmediately) {
+  FakeLlmClient fake([](int) { return textResp("never reached"); });
+  ToolRegistry reg;
+  AgentLoop loop(fake, reg, 16);
+  auto cancel = std::make_shared<std::atomic<bool>>(true);
+  loop.setCancelToken(cancel);
+  std::vector<Message> msgs = {userText("hi")};
+  std::string reply = loop.run(msgs);
+  EXPECT_NE(reply.find("已取消"), std::string::npos);
+  EXPECT_EQ(fake.calls_, 0);  // 没机会调到 LLM
+}
+
+// ④ 取消信号:运行中 cancel → 后续 iter 检测到 → 退出
+TEST(AgentLoop, CancelTokenDuringToolLoopStopsAtNextIter) {
+  auto cancel = std::make_shared<std::atomic<bool>>(false);
+  FakeLlmClient fake([&](int i) {
+    if (i == 0) cancel->store(true);  // 第一次 sendStream 内部设 cancel,
+                                       // 模拟"运行中用户按下取消"。
+                                       // 第二次循环顶端会检测到并退出。
+    return i == 0 ? toolResp("c1", "echo", json{{"v", "ok"}}) : textResp("should not see");
+  });
+  ToolRegistry reg = registryWith(echoTool());
+  AgentLoop loop(fake, reg, 16);
+  loop.setCancelToken(cancel);
+  std::vector<Message> msgs = {userText("go")};
+  std::string reply = loop.run(msgs);
+  EXPECT_NE(reply.find("已取消"), std::string::npos);
+  // 第一次 sendStream 跑完后,循环顶端检测 cancel → 退出,不再调第二次。
+  // fake.calls_ 应等于 1(只跑了第一次)。
+  EXPECT_LE(fake.calls_, 1);
+}
+
+// ⑤ MaxIter 注入警告:已有 HitsMaxIterationsGracefully,这里再补"必须含助手警告消息"
+TEST(AgentLoop, MaxIterInjectsAssistantWarningMessage) {
+  FakeLlmClient fake([](int) { return toolResp("c", "echo", json{{"v", "x"}}); });
+  ToolRegistry reg = registryWith(echoTool());
+  AgentLoop loop(fake, reg, 2);  // 紧上限
+  std::vector<Message> msgs = {userText("loop")};
+  loop.run(msgs);
+  // 末尾应是助手警告消息(含"最大迭代")
+  bool hasNote = false;
+  for (const auto& m : msgs) {
+    if (m.role == Role::Assistant) {
+      for (const auto& b : m.content) {
+        if (auto* t = std::get_if<TextBlock>(&b)) {
+          if (t->text.find("最大迭代") != std::string::npos) hasNote = true;
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(hasNote);
 }

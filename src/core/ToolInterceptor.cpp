@@ -82,6 +82,12 @@ namespace aicoder
       }
 
       // 3) 需要权限且未命中 → 询问
+      // 先调用 yield:让 UI 层在两次弹窗间插入缓冲(屏幕重绘、
+      // 键盘缓冲清空、短暂 sleep)。这样用户的"上一次 Enter"在
+      // 物理上已经抬起/消耗,不会穿透到当前弹窗。
+      if (betweenAsksYield_)
+        betweenAsksYield_();
+
       AskResult ask = AskResult::Deny;
       if (asker_)
         ask = asker_(tu, tu.name);

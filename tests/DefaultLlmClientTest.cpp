@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <atomic>
 #include <memory>
 #include "llm/DefaultLlmClient.h"
 #include "llm/OpenAIProvider.h"
@@ -16,13 +17,15 @@ public:
   std::string lastBody;         // 记录请求体（验证 stream:true）
 
   HttpResponse post(const std::string&, const std::string& body,
-                    const std::vector<std::string>&) override {
+                    const std::vector<std::string>&,
+                    const std::atomic<bool>* /*cancel*/ = nullptr) override {
     lastBody = body;
     return next;
   }
   HttpResponse postStream(const std::string&, const std::string& body,
                           const std::vector<std::string>&,
-                          const ChunkCallback& onChunk) override {
+                          const ChunkCallback& onChunk,
+                          const std::atomic<bool>* /*cancel*/ = nullptr) override {
     lastBody = body;
     // 一次性把整个 SSE 文本作为一个 chunk 回放（解析器对分块不敏感）
     onChunk(next.body);
