@@ -1,5 +1,6 @@
 #include "ReplView.h"
 #include "Welcome.h"
+#include "ui/PermissionDialog.h"
 #include "util/LruCache.h"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/event.hpp"
@@ -718,9 +719,15 @@ namespace aicoder
     std::mutex permissionMutex_;
     std::condition_variable permissionCv_;
     bool permissionPending_ = false;
-    bool permissionGranted_ = false;
-    std::string permissionPath_;
-    std::string permissionContent_;
+    // 三态选择结果(替代旧 bool)。UI 通过 PermissionDialog 写入。
+    PermissionChoice permissionResult_ = PermissionChoice::Deny;
+    // 弹窗的请求 + Dialog 实例(TUI 端),由 waitForPermission 投递后构造。
+    PermissionRequest permissionRequest_;
+    std::unique_ptr<PermissionDialog> permissionDialog_;
+    // 用户选 "Yes, and never ask again" 时回调 —— App 层在此写 PermissionStore。
+    ReplView::AllowForeverCallback allowForeverCallback_;
+    // 持久化放行查询(命中则不进弹窗)。可选。
+    ReplView::AllowLookupCallback allowLookupCallback_;
 
     static constexpr float kScrollStep = 0.1f;
 
@@ -846,15 +853,19 @@ namespace aicoder
       int nowLine = static_cast<int>(std::round(scroll_pos_ * totalLines_));
       if (totalLines_ == 0) nowLine = 0;
 
-      // Permission confirmation overlay
-      if (permissionPending_) {
-        std::string info = "permission confirm: write_file\npath: " + permissionPath_;
-        if (permissionContent_.size() > 80)
-          info += "\ncontent: " + permissionContent_.substr(0, 80) + "...";
-        else if (!permissionContent_.empty())
-          info += "\ncontent: " + permissionContent_;
-        info += "\npress [y] allow / [n] deny";
-        els.push_back(ftxui::text(info) | ftxui::border);
+      // Permission confirmation overlay —— Modal 弹窗。
+      // 弹窗期间,layout 下面会把 input 框隐藏,所有键盘事件
+      // 走 PermissionDialog::OnEvent,直到 finished_。
+      // 注意:这里用 Render() 拿一个静态 element(事件路由在 CatchEvent)。
+      if (permissionPending_ && permissionDialog_) {
+        // 把弹窗放在消息区**之前**,以免被 yframe 截断。
+        // 但又必须保证不破坏 layout 顺序:这里在 els 顶部插入,然后
+        // 后面整体仍走 yframe;若内容超长 yframe 会滚动。
+        ftxui::Elements dialogEls;
+        dialogEls.push_back(permissionDialog_->Render());
+        // 弹窗前后各留一行空
+        els.insert(els.begin(), ftxui::text(""));
+        els.insert(els.begin(), ftxui::vbox(std::move(dialogEls)) | ftxui::color(ftxui::Color::Default));
       }
 
       auto messages_area = ftxui::vbox(std::move(els)) |
@@ -889,10 +900,19 @@ namespace aicoder
       // 输入区夹在上下分隔线之间：给真实高度 + 垂直居中，文字上下自然留白、不紧凑，
       // 用元素自身高度撑开，而不是插入空行占位。
       // 输入行：只有 》 + 输入区，不再挤模式标签。
-      layout.push_back(
-          ftxui::hbox({ ftxui::text("》 "), input->Render() })
-              | ftxui::vcenter
-              | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kInputBoxHeight));
+      // Modal 弹窗期间:input 框隐藏,键盘焦点完全交给 PermissionDialog。
+      if (!permissionPending_) {
+        layout.push_back(
+            ftxui::hbox({ ftxui::text("》 "), input->Render() })
+                | ftxui::vcenter
+                | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kInputBoxHeight));
+      } else {
+        // 占位:维持 3 行高度,让弹窗/状态行不抖动
+        layout.push_back(
+            ftxui::hbox({ ftxui::text(" ") })
+                | ftxui::vcenter
+                | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kInputBoxHeight) | ftxui::dim);
+      }
       layout.push_back(ftxui::separator());  // 输入区与状态行之间的分隔线
       // 状态提示行：模式标签单独一行、靠左对齐（前置空格留点边距）。下方不再加分隔线，
       // 状态行即一个独立的单行容器，直接紧贴 App 外边框。
@@ -912,18 +932,19 @@ namespace aicoder
 
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
                                     {
-      if (permissionPending_) {
-        // 权限弹窗期间只拦截 y/n,其余事件放行
-        // —— 这样用户仍能在输入框继续打字,文字不会"被吞"或"被隐藏"。
-        if (e == ftxui::Event::Character('y') || e == ftxui::Event::Character('Y')) {
-          grantPermission(true);
+      if (permissionPending_ && permissionDialog_) {
+        // Modal:全部事件交给 PermissionDialog(方向键/Enter/Esc/Tab)。
+        // 它"已 finished"则向上 return false 触发通知流程。
+        if (permissionDialog_->OnEvent(e)) {
+          if (permissionDialog_->Finished()) {
+            grantPermission(permissionDialog_->Result());
+            // 把 dialog 析构,让"pending"翻 false,input 框恢复显示
+            permissionDialog_.reset();
+          }
           return true;
         }
-        if (e == ftxui::Event::Character('n') || e == ftxui::Event::Character('N')) {
-          grantPermission(false);
-          return true;
-        }
-        return false;  // 放行到 input,继续累加 input_text_
+        // dialog 没消费(例如鼠标非预期)——Modal 期间不放行到 input
+        return true;
       }
       // 命令补全激活时（输入以 / 开头且有候选）：拦截上下/Tab/Enter。
       {
@@ -987,10 +1008,13 @@ namespace aicoder
       return false; });
     }
 
-    void grantPermission(bool granted)
+    void grantPermission(PermissionChoice choice)
     {
       std::lock_guard<std::mutex> lock(permissionMutex_);
-      permissionGranted_ = granted;
+      permissionResult_ = choice;
+      // AllowForever 通知到 App 层(写 PermissionStore)
+      if (choice == PermissionChoice::AllowForever && allowForeverCallback_)
+        allowForeverCallback_(permissionRequest_.tool_name, permissionRequest_.input);
       permissionPending_ = false;
       permissionCv_.notify_one();
     }
@@ -1032,31 +1056,41 @@ namespace aicoder
         onSubmit_(txt);
     }
 
+    // waitForPermission:worker 线程阻塞等待;UI 线程通过 PermissionDialog
+    // 拿到 Allow / AllowForever / Deny。返回 bool (Allow 或 AllowForever → true)。
+    // 持久化(AllowForever)由 App 层在 grantPermission 内回调,这里只上报 choice。
     bool waitForPermission(const std::string &toolName, const json &input)
     {
-      std::string path = input.value("path", "(unknown)");
-      std::string content = input.value("content", "");
+      // 1) 静默放行:命中持久化规则,直接返回 true,不打搅用户。
+      if (allowLookupCallback_ && allowLookupCallback_(toolName, input))
+        return true;
+
+      // 2) 弹窗询问
+      PermissionRequest req;
+      req.tool_name = toolName;
+      req.input = input;
+      req.description = input.value("description", std::string{});
 
       if (screen)
       {
         auto self = self_.lock();
         if (self)
         {
-          screen->Post([=, this]()
+          screen->Post([this, req]() mutable
                        {
-          auto p = self_.lock();
-          if (!p) return;
-          p->permissionPath_ = path;
-          p->permissionContent_ = content;
-          p->permissionPending_ = true; });
-          screen->PostEvent(ftxui::Event::Custom); // 令帧失效，否则弹框不显示（见 appendDelta）
+          // 投递到 UI 线程:实例化弹窗、置 pending 标志、强制重绘。
+          permissionRequest_ = req;
+          permissionDialog_ = std::make_unique<PermissionDialog>(permissionRequest_);
+          permissionPending_ = true; });
+          screen->PostEvent(ftxui::Event::Custom);
         }
       }
 
       std::unique_lock<std::mutex> lock(permissionMutex_);
       permissionCv_.wait(lock, [this]
                          { return !permissionPending_; });
-      return permissionGranted_;
+      PermissionChoice result = permissionResult_;
+      return (result == PermissionChoice::Allow || result == PermissionChoice::AllowForever);
     }
   };
 
@@ -1182,6 +1216,16 @@ namespace aicoder
   bool ReplView::askPermission(const std::string &toolName, const json &input)
   {
     return impl_->waitForPermission(toolName, input);
+  }
+
+  void ReplView::setAllowForeverCallback(AllowForeverCallback cb)
+  {
+    impl_->allowForeverCallback_ = std::move(cb);
+  }
+
+  void ReplView::setAllowLookupCallback(AllowLookupCallback cb)
+  {
+    impl_->allowLookupCallback_ = std::move(cb);
   }
 
 } // namespace aicoder

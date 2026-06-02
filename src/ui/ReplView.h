@@ -51,7 +51,16 @@ namespace aicoder
     void setCommands(std::vector<std::pair<std::string, std::string>> commands);
 
     // 权限询问：worker 线程调此方法等待用户批准（同步阻塞）
-    // 内部 Post 到 UI 线程弹出确认框，等待用户按 y/n 或点击按钮。
+    // 内部 Post 到 UI 线程弹出 PermissionDialog,等待用户选 Allow / AllowForever / Deny。
+    // 选 AllowForever 时,回调 onAllowForever(toolName, input) 会被调用
+    // —— App 层在此回调里写 PermissionStore。
+    using AllowForeverCallback = std::function<void(const std::string &toolName, const json &input)>;
+    void setAllowForeverCallback(AllowForeverCallback cb);
+
+    // 命中持久化规则时,worker 不进弹窗直接放行。App 在此注入 PermissionStore 查询。
+    using AllowLookupCallback = std::function<bool(const std::string &toolName, const json &input)>;
+    void setAllowLookupCallback(AllowLookupCallback cb);
+
     bool askPermission(const std::string &toolName, const json &input);
 
     // 工具调用展示：每次工具执行后追加一行"⚙ 工具名 + 参数预览 + 结果摘要"，

@@ -1,4 +1,5 @@
 #include "core/AgentLoop.h"
+#include "core/ToolInterceptor.h"
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -104,18 +105,31 @@ std::string AgentLoop::run(std::vector<Message>& messages,
     if (toolUses.empty())
       return assistantText(resp.assistant_message);
 
-    Message toolMsg{Role::Tool, {}};
-    for (const auto& tu : toolUses) {
-      // 权限检查：仅对声明 needsPermission 的工具询问；只读工具（Read/Grep/Glob/ls）直接执行。
-      ToolResultBlock result =
-          (registry_.needsPermission(tu.name) && !permCb(tu.name, tu.input))
-              ? ToolResultBlock{tu.id, "permission denied", true}
-              : registry_.invoke(tu.id, tu.name, tu.input);
-      // 告知 UI：调了什么工具、参数、结果摘要（受限/不受限工具都上报）。
+    // 拦截器：把 LLM 一次性返回的 toolUses 串行处理,任一 Deny/失败
+    // 会中断队列,后续工具标记为 skipped。保留旧 permCb 签名(bool)→
+    // 在拦截器内转成 AskResult {Allow, Deny};AllowForever 由持久化层
+    // 自行提供 AllowLookup,UI 路径会在 ReplView 侧接线。
+    ToolInterceptor interceptor;
+    interceptor.setMetaLookup([this](const std::string& name) {
+      return ToolMeta{name, registry_.needsPermission(name)};
+    });
+    interceptor.setAsker([&permCb](const ToolUseBlock& tu, const std::string& name) {
+      // 旧 API 只暴露 bool,无 AllowForever 路径。持久化白名单由
+      // AllowLookup 提供,这里 Deny 时直接中止队列。
+      return permCb(name, tu.input) ? AskResult::Allow : AskResult::Deny;
+    });
+    interceptor.setExecutor([this](const ToolUseBlock& tu) {
+      return registry_.invoke(tu.id, tu.name, tu.input);
+    });
+    interceptor.setStepReporter([this](const ToolUseBlock& tu, const ToolResultBlock& r) {
       if (onToolCall_)
-        onToolCall_(tu.name, tu.input, result.content, result.is_error);
-      toolMsg.content.push_back(std::move(result));
-    }
+        onToolCall_(tu.name, tu.input, r.content, r.is_error);
+    });
+
+    auto results = interceptor.intercept(toolUses);
+    Message toolMsg{Role::Tool, {}};
+    for (auto& r : results)
+      toolMsg.content.push_back(std::move(r));
     messages.push_back(std::move(toolMsg));
 
     // 每步工具后的自检：注入反思提示，模型下一轮先反思再决定继续/收尾。

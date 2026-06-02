@@ -4,6 +4,7 @@
 #include "core/Message.h"
 #include "core/Errors.h"
 #include "core/Json.h"
+#include "core/PermissionStore.h"
 #include "commands/CommandRouter.h"
 #include "llm/StreamDelta.h"
 #include "sessions/Session.h"
@@ -86,6 +87,16 @@ namespace aicoder
       for (const auto &c : router.commands())
         cmds.push_back({c.name, c.description});
       replView.setCommands(std::move(cmds));
+
+      // 持久化层接线:工具执行前查规则,选 AllowForever 时落规则。
+      // store 必须在 App 生命周期内有效;这里 lifetime 等于整个 TUI 会话,够用。
+      static PermissionStore permStore;
+      replView.setAllowLookupCallback(
+          [](const std::string &tool, const json &input)
+          { return permStore.isAllowed(tool, input); });
+      replView.setAllowForeverCallback(
+          [](const std::string &tool, const json &input)
+          { permStore.allowForever(tool, input); });
     }
 
     void saveTurn() {
