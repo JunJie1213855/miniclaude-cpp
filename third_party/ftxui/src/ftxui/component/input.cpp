@@ -150,15 +150,10 @@ class InputBase : public ComponentBase, public InputOption {
       // The cursor is at the end of the line.
       const std::string cursor_cell = is_focused ? " " : "";
       if (cursor_char_index >= (int)line.size()) {
-        // If last character is wide (CJK), use two spaces so cursor_box_
-        // reflects correct width and x_min-1 lands on character boundary.
+        // 光标位置语义：cursor_elem 占据光标"之后"那个 cell。
+        // dom/node.cpp 已把 box_.x_min 直接作为 1-based column(已包含 wide-char 修正)，
+        // 这里不需要为 CJK 特殊处理空格宽度。
         auto cursor_elem = text(cursor_cell) | focused | reflect(cursor_box_);
-        if (is_focused && !line.empty()) {
-          int last_idx = static_cast<int>(GlyphPrevious(line, line.size()));
-          if (GlyphWidth(line, last_idx) >= 2) {
-            cursor_elem = text("  ") | focused | reflect(cursor_box_);
-          }
-        }
         elements.push_back(
             hbox({
                 Text(line),
@@ -175,14 +170,9 @@ class InputBase : public ComponentBase, public InputOption {
       const std::string part_at_cursor =
           line.substr(glyph_start, glyph_end - glyph_start);
       const std::string part_after_cursor = line.substr(glyph_end);
-      // For wide characters (CJK), the cursor element must have explicit
-      // width set, otherwise reflect(cursor_box_) computes a width-1 box
-      // and the terminal cursor lands inside the character.
-      int cursor_width = GlyphWidth(line, glyph_start);
+      // cursor_elem 占据光标处字符所在 cell；box.x_min = 该 cell 起点。
+      // 配合 dom/node.cpp 修正,光标正好画在字符左侧(对 CJK 也对)。
       auto cursor_elem = Text(part_at_cursor) | focused | reflect(cursor_box_);
-      if (cursor_width >= 2) {
-        cursor_elem = cursor_elem | size(WIDTH, EQUAL, cursor_width);
-      }
       auto element = hbox({
                          Text(part_before_cursor),
                          std::move(cursor_elem),

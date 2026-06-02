@@ -155,8 +155,15 @@ void Render(Screen& screen, Node* node, Selection& selection) {
   }
 
   if (use_cursor) {
+    // cursor_.x 是终端 1-based column,等价于 0-based cell 索引 box_.x_min：
+    // 渲染器把"光标处的字符"作为 focused 子元素,其 box_.x_min 就是要插入
+    // 位置的 cell 索引。直接用它定位光标,对单宽和多宽(CJK)字符都对。
+    //   - 光标在 'a' (cell 0) 之前 → box.x_min=0 → column 1 ✅
+    //   - 光标在 '中' (cell 1-2) 之前 → box.x_min=1 → column 2 ✅
+    //   - 光标在 'b' (cell 3) 之后 → cursor_elem="",box.x_min=4 → column 4 ✅
+    // 之前用 `x_min - 1` 在 CJK 之后会跳到 wide char 内部(本 commit 修正)。
     screen.SetCursor(Screen::Cursor{
-        node->requirement().focused.node->box_.x_min - 1,
+        node->requirement().focused.node->box_.x_min,
         node->requirement().focused.node->box_.y_min,
         node->requirement().focused.cursor_shape,
     });

@@ -4,9 +4,10 @@
 #include <vector>
 #include "ftxui/component/component.hpp"
 
-namespace aicoder {
+namespace aicoder
+{
 
-// Welcome screen with ASCII pixel art representation
-ftxui::Element welcomeScreen();
+    // Welcome screen with ASCII pixel art representation
+    ftxui::Element welcomeScreen();
 
-}  // namespace aicoder
+} // namespace aicoder
