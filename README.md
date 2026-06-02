@@ -1,177 +1,213 @@
 # AICoder
 
-基于 LLM 的终端编码助手，支持工具调用（Tool Use），可在命令行中完成文件操作、代码搜索、Shell 命令执行等开发任务。
+基于 LLM 的终端编码助手（C++20 + FTXUI），支持 Tool Use、多模式 Agent、会话管理，可在命令行完成文件操作、代码搜索、Shell 命令执行等开发任务。
 
-## 设计理念
+## 核心特性
 
-### 核心理念
+- **TUI 交互** — 基于 FTXUI 的终端界面，支持 Markdown 渲染、代码高亮、流式输出
+- **三种 Agent 模式** — 普通（ReAct）、反思（Reflection）、计划执行（Plan & Execute）
+- **11 种内置工具** — 文件读写、搜索、Shell 执行，细粒度权限控制
+- **会话管理** — `/sessions` 命令实时查看、切换、删除历史会话
+- **Skill 系统** — 外部 YAML/Markdown 技能注册，`/<skill>` 即调用
+- **斜杠命令** — Tab 补全、模板展开、`$ARGUMENTS` 占位符
+- **配置文件导入** — `~/.aicoder/settings.json` 集中管理 API 密钥和模型配置
+- **流式 SSE** — libcurl + OpenAI/DeepSeek 兼容 API，支持 reasoning_content
 
-**所见即终端** — 不同于 Web/桌面 IDE AICoder 采用 TUI（终端用户界面），直接在终端运行，无需额外窗口。一个 SSH 连接即可工作，覆盖全场景。
-
-**本地优先** — 所有数据（Session、配置、规则）存储在本地文件系统，不依赖云端服务。API 调用仅用于 LLM 推理。
-
-**安全可控** — 文件操作、Shell 命令执行前需用户确认，权限可按工具类型细粒度控制。
-
-### 架构概览
+## 架构概览
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                     UI 层                            │
-│  ┌─────────┐  ┌─────────┐  ┌─────────────────────┐ │
-│  │  App    │  │ReplView │  │  PermissionDialog   │ │
-│  │(FTXUI)  │  │(FTXUI)  │  │     (FTXUI)          │ │
-│  └────┬────┘  └────┬────┘  └──────────┬──────────┘ │
-└───────┼────────────┼─────────────────┼─────────────┘
-        │            │                 │
-        ▼            ▼                 ▼
-┌─────────────────────────────────────────────────────┐
-│                   AgentLoop                          │
-│  ┌─────────────────────────────────────────────┐   │
-│  │  run() / runWithReflection() / runPlanExecute()  │
-│  └──────────────────────┬──────────────────────┘   │
-└─────────────────────────┼───────────────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        ▼                 ▼                 ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ LlmClient    │  │ ToolRegistry │  │MessageStore  │
-│ (流式推理)    │  │  (工具执行)   │  │  (上下文)    │
-└──────┬───────┘  └──────┬───────┘  └──────────────┘
-       │                 │
-       ▼                 ▼
-┌──────────────┐  ┌──────────────┐
-│ Provider     │  │ Tool*        │
-│ (请求编码)    │  │ (10种内置)   │
-├──────────────┤  └──────────────┘
-│ Transport    │
-│ (HTTP/libcurl)│
-└──────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                       UI 层                               │
+│  App (FTXUI)  ReplView  SessionPicker  PermissionDialog │
+└──────────────────────┬───────────────────────────────────┘
+                       │
+┌──────────────────────┼───────────────────────────────────┐
+│              AgentLoop (核心循环)                          │
+│  run() / runWithReflection() / runPlanExecute()          │
+│  ToolInterceptor (权限管线)  ContextCompaction (压缩)     │
+│  CancelToken (中断)                                       │
+└───┬──────────────┬────────────────┬──────────────────────┘
+    │              │                │
+    ▼              ▼                ▼
+┌─────────┐  ┌───────────┐  ┌──────────────┐
+│LlmClient│  │ToolRegistry│  │SessionStore  │
+│Provider │  │ 11内置+Skill│  │(JSON本地存储)│
+│Transport│  └───────────┘  └──────────────┘
+└─────────┘
 ```
 
-### 三种 Agent 模式
+### LLM 调用栈
 
-| 模式 | 方法 | 适用场景 |
-|------|------|----------|
-| **普通** | `run()` | 简单任务，单轮工具调用 |
-| **反思** | `runWithReflection()` | 复杂任务，引入评论家（Critic）自我批判后迭代 |
-| **计划执行** | `runPlanExecute()` | 多步骤任务，先规划再分步执行 |
-
-### 工具生态
-
-**只读工具**（直接执行）：
-- `read_file` — 读取文件内容
-- `list_dir` — 列出目录
-- `glob` — 文件模式匹配
-- `grep` — 代码搜索
-
-**写操作工具**（需用户确认）：
-- `write_file` / `edit_file` — 文件修改
-- `create_file` / `create_dir` — 创建文件/目录
-- `delete_file` / `move_file` — 删除/移动
-- `bash` — 执行 Shell 命令（30s 超时，32KB 输出上限）
-
-### 消息模型
-
-支持多模态内容块（TextBlock + ToolUseBlock + ToolResultBlock 混合），兼容 OpenAI Tools API 格式，可对接任意兼容 API（DeepSeek、OpenAI 等）。
-
----
+```
+LlmClient (抽象) → DefaultLlmClient
+  ├── Provider (抽象) → OpenAIProvider  (请求编码, 兼容 DeepSeek)
+  └── Transport (抽象) → HttpTransport (libcurl, SSE 流式 POST)
+```
 
 ## 编译
 
 ### 依赖
 
-- **C++20** 编译器（gcc/clang）
-- **libcurl**（HTTP 通信）
-- **xmake**（构建工具）
+- C++20 编译器（gcc ≥ 11 / clang ≥ 14）
+- libcurl（HTTP 通信）
+- xmake 或 CMake ≥ 3.16
 
-### 方式一：xmake（推荐）
+### xmake（推荐）
 
 ```bash
-# 安装 xmake
-curl -fsSL https://xmake.io/shget.text | bash
-
-# 编译
 xmake build aicoder
-
-# 运行
 ./build/aicoder
 ```
 
-### 方式二：CMake（备选）
+### CMake
 
 ```bash
 mkdir build && cd build
 cmake ..
 cmake --build .
-./aicoder
+./aicoder_tui
 ```
+
+## 配置
 
 ### 环境变量
 
 ```bash
 export AICODER_API_KEY=sk-xxx           # 必需
-export AICODER_BASE_URL=https://api.deepseek.com/v1  # 可选，默认 DeepSeek
+export AICODER_BASE_URL=https://api.deepseek.com/v1  # 可选
 export AICODER_MODEL=deepseek-v4-pro    # 可选
-export AICODER_MAX_ITERATIONS=16        # 可选，最大迭代轮次
+export AICODER_MAX_ITERATIONS=16        # 可选
 ```
 
-### 运行
+### 配置文件（推荐）
+
+将密钥和模型写入 `~/.aicoder/settings.json`，无需每次 export：
+
+```json
+{
+  "env": {
+    "AICODER_AUTH_TOKEN": "sk-xxx",
+    "AICODER_BASE_URL": "https://api.deepseek.com/anthropic",
+    "AICODER_DEFAULT_MODEL": "deepseek-v4-pro[1m]"
+  }
+}
+```
+
+**优先级**: 环境变量 > settings.json。`AICODER_API_KEY` 环境变量优先于文件中的 `AICODER_AUTH_TOKEN`。
+
+## 运行
 
 ```bash
 # TUI 模式（默认）
-./build/aicoder
-
-# CLI 模式（无 TUI）
-./build/aicoder --cli
+./build/aicoder_tui
 
 # 恢复上次会话
-./build/aicoder -c
+./build/aicoder_tui -c
 
 # 交互式选择会话
-./build/aicoder --resume
+./build/aicoder_tui --resume
+
+# 列出所有会话
+./build/aicoder_tui --list-sessions
 ```
 
----
+## 运行时命令
+
+| 命令 | 说明 |
+|------|------|
+| `/quit`, `/exit` | 退出程序 |
+| `/clear` | 清空当前对话，开始新会话 |
+| `/sessions` | 查看、切换、删除历史会话 |
+| `/reload-skills` | 重新发现并加载 Skill |
+| `/<name>` | 调用自定义命令或 Skill |
+
+### 会话管理（`/sessions`）
+
+- `↑↓` 浏览会话列表，`Enter` 切换到选中会话
+- `x` 删除选中会话（需 `y/n` 确认，当前会话不可删除）
+- `Esc` 返回
+- 切换前自动保存当前会话，切换后立即加载历史消息
+
+### 模式切换
+
+`Tab` 键循环切换三种对话模式：
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **普通** | ReAct 工具调用循环 | 简单任务 |
+| **反思** | Critic 评论 + 修订（最多 3 轮） | 复杂推理 |
+| **计划** | 先规划步骤 → 逐步执行 → 综合 | 多步骤任务 |
+
+## 工具生态
+
+### 只读工具（直接执行）
+
+| 工具 | 说明 |
+|------|------|
+| `read_file` | 读取文件内容 |
+| `list_dir` | 列出目录 |
+| `glob` | 文件模式匹配 |
+| `grep` | 代码内容搜索 |
+
+### 写操作工具（需用户确认）
+
+| 工具 | 说明 |
+|------|------|
+| `write_file` / `edit_file` | 写入/编辑文件 |
+| `create_file` / `create_dir` | 创建文件/目录 |
+| `delete_file` / `move_file` | 删除/移动文件 |
+| `bash` | Shell 命令（30s 超时，32KB 上限） |
+
+### 权限控制
+
+- 首次使用受限工具时弹窗询问：允许 / 永久允许 / 拒绝
+- `AllowForever` 规则持久化到 `~/.config/aicoder/permissions.json`
+- 后续命中相同模式自动放行
 
 ## 目录结构
 
 ```
 src/
-├── main.cpp              # CLI REPL 入口
-├── main_tui.cpp          # TUI 入口
-├── agent/                 # Agent 核心（待拆分）
-├── commands/             # 斜杠命令路由
-├── config/               # 环境变量配置
-├── llm/                   # LLM 调用层（Client/Provider/Transport）
-├── rules/                 # 系统提示规则加载
-├── sessions/              # 会话存储（CliArgs/Session/SessionStore）
-├── skills/                # Skill 工具注册
-├── tools/                 # 10 种内置工具
-├── ui/                    # FTXUI 界面组件
-└── workspace/             # 工作区状态
+├── main.cpp                 # TUI 入口
+├── config/                  # 环境变量 + settings.json 配置
+├── core/                    # AgentLoop, ToolRegistry, ToolInterceptor,
+│                            #   Message, PermissionStore, Errors
+├── llm/                     # LlmClient → OpenAIProvider → HttpTransport
+│                            #   StreamParser, Response, StreamDelta
+├── tools/                   # 11 种内置工具
+├── commands/                # 斜杠命令路由与模板发现
+├── skills/                  # Skill 注册与 SkillTool
+├── sessions/                # 会话持久化 (SessionStore)
+├── rules/                   # 规则发现 → system prompt
+├── ui/                      # App, ReplView, SessionPicker, ResumePicker,
+│                            #   Welcome, PermissionDialog, ConsoleRepl
+├── util/                    # ThreadPool, LruCache
+└── workspace/               # 文件读取、frontmatter 解析、globalDir
+tests/                       # GoogleTest 单元测试 (137 个)
+third_party/                 # FTXUI (vendor), nlohmann/json
 ```
 
----
-
-## 未来展望
+## 路线图
 
 ### 短期
 
-- [ ] **Skill 系统完善** — 支持用户自定义 Skill，扩展工具生态
-- [ ] **命令补全** — 斜杠命令 Tab 补全，降低使用门槛
-- [ ] **会话搜索** — 基于语义的历史会话检索
-- [ ] **Markdown 渲染增强** — 代码高亮、表格渲染优化
+- [x] 三种 Agent 模式（ReAct / Reflection / Plan & Execute）
+- [x] 会话管理（查看、切换、删除）
+- [x] 配置文件导入（settings.json）
+- [x] 权限持久化（AllowForever）
+- [ ] 会话语义搜索
+- [ ] Markdown 表格渲染增强
 
 ### 中期
 
-- [ ] **多会话管理** — 并行多个 Agent 会话，Tab 切换
-- [ ] **插件系统** — 外部动态库插件，Sandbox 隔离执行
-- [ ] **云端配置同步** — 跨设备配置加密同步
-- [ ] **内置代码库索引** — 支持大型项目的语义搜索（RAG）
+- [ ] 多会话并行（Tab 切换）
+- [ ] 插件系统（外部动态库，Sandbox 隔离）
+- [ ] 云端配置加密同步
+- [ ] 内置代码库索引（RAG）
 
 ### 长期
 
-- [ ] **协作模式** — 多人实时协作编码
-- [ ] **Agent 市场** — 分享和发现垂直领域 Agent
-- [ ] **可视化调试** — 图形化展示 Agent 决策过程
-- [ ] **跨平台桌面版** — 基于相同 Core 的 Electron/wxWidgets 桌面应用
+- [ ] 协作模式（多人实时编码）
+- [ ] Agent 市场
+- [ ] 可视化 Agent 决策过程
+- [ ] 跨平台桌面版（Electron / wxWidgets）
