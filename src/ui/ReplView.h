@@ -49,6 +49,8 @@ namespace aicoder
 
     // 设置命令补全列表（data-driven，替代硬编码的 kSlashCommands）。
     void setCommands(std::vector<std::pair<std::string, std::string>> commands);
+    // 设置当前模型名（供 welcome 页展示）。
+    void setModel(const std::string& model);
 
     // 权限询问：worker 线程调此方法等待用户批准（同步阻塞）
     // 内部 Post 到 UI 线程弹出 PermissionDialog,等待用户选 Allow / AllowForever / Deny。

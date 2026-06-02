@@ -7,7 +7,8 @@
 namespace aicoder
 {
 
-    // Welcome screen with ASCII pixel art representation
-    ftxui::Element welcomeScreen();
+    // Welcome screen with ASCII pixel art representation.
+    // model: 当前使用的模型名，显示在欢迎页中。
+    ftxui::Element welcomeScreen(const std::string& model);
 
 } // namespace aicoder

@@ -699,6 +699,7 @@ namespace aicoder
     // 注意:它的子节点在 waitForPermission 时被动态替换。
     ftxui::Component inputArea_;
     ftxui::ScreenInteractive *screen = nullptr;
+    std::string model_;
     std::vector<UIMessage> messages_;
     std::string input_text_;
     bool thinking_ = false;
@@ -874,7 +875,7 @@ namespace aicoder
       ftxui::Elements layout;
       // Welcome 屏:与消息区并列,固定在 layout 顶部,不随消息滚动消失。
       // 输入和输出消息时,welcome 屏保持显示。
-      layout.push_back(welcomeScreen() | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 14));
+      layout.push_back(welcomeScreen(model_) | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 14));
       layout.push_back(ftxui::separator());
       layout.push_back(messages_area);
       layout.push_back(ftxui::separator() | ftxui::color(ftxui::Color::GrayDark));  // 灰色上分隔线
@@ -1243,6 +1244,11 @@ namespace aicoder
   void ReplView::setCommands(std::vector<std::pair<std::string, std::string>> c)
   {
     impl_->commands_ = std::move(c);
+  }
+
+  void ReplView::setModel(const std::string& model)
+  {
+    impl_->model_ = model;
   }
 
   bool ReplView::askPermission(const std::string &toolName, const json &input)

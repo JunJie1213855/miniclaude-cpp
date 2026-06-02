@@ -13,7 +13,7 @@ namespace aicoder
     Cleared,
     Prompt,
     Reloaded, // /reload-skills 命中；CommandOutcome::prompt 是给用户看的状态提示
-    Sessions,  // /sessions：查看并切换历史会话
+    Sessions, // /sessions：查看并切换历史会话
     NotACommand
   };
   struct CommandOutcome

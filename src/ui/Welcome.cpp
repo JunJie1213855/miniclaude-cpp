@@ -18,7 +18,7 @@ namespace aicoder
         "                  └───┘                    ",
     };
 
-    ftxui::Element welcomeScreen()
+    ftxui::Element welcomeScreen(const std::string& model)
     {
         using namespace ftxui;
 
@@ -31,7 +31,7 @@ namespace aicoder
             leftCol.push_back(text(line) | color(Color::RGB(200, 140, 100)) | center);
         }
         leftCol.push_back(text(""));
-        leftCol.push_back(text("MiniMax-M3 • Local Agent Task") | dim | center);
+        leftCol.push_back(text(model) | dim | center);
         leftCol.push_back(text("~/build/linux/x86_64/aicoder") | dim | center);
 
         // Right column: tips panel + What's new
