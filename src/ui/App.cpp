@@ -9,6 +9,7 @@
 #include "llm/StreamDelta.h"
 #include "sessions/Session.h"
 #include "sessions/SessionStore.h"
+#include "ui/SessionPicker.h"
 #include "util/ThreadPool.h"
 #include "ftxui/screen/screen.hpp"
 #include "ftxui/component/component.hpp"
@@ -57,6 +58,8 @@ namespace aicoder
     std::string sessionId_;
     std::string model_;
     ReplView replView;
+    std::shared_ptr<std::atomic<bool>> cancel_;
+    std::shared_ptr<std::atomic<bool>> taskRunning_;
 
     Impl(AgentLoop &loop, CommandRouter &router, std::vector<Message> initialMsgs,
          SessionStore &store, std::string sid, std::string m)
@@ -97,6 +100,10 @@ namespace aicoder
       replView.setAllowForeverCallback(
           [](const std::string &tool, const json &input)
           { permStore.allowForever(tool, input); });
+
+      cancel_ = std::make_shared<std::atomic<bool>>(false);
+      taskRunning_ = std::make_shared<std::atomic<bool>>(false);
+      agentLoop.setCancelToken(cancel_);
     }
 
     void saveTurn() {
@@ -128,6 +135,46 @@ namespace aicoder
         replView.appendMessage({"[对话已清空]", false, false});
         return;
       }
+      if (outcome.result == CommandResult::Sessions)
+      {
+        // 取消正在运行的 AgentLoop 任务并等待 worker 退出。
+        // 直接轮询 taskRunning_（不用 [&] syncDone —— 若超时则引用悬空）。
+        bool wasRunning = taskRunning_->load();
+        if (wasRunning) {
+          cancel_->store(true);
+          for (int i = 0; i < 120 && taskRunning_->load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        // 保存当前会话
+        saveTurn();
+        // 弹窗选择
+        auto newId = showSessionPicker(store, sessionId_);
+        if (newId && *newId != sessionId_) {
+          // 加载新会话并回放到 UI
+          auto data = store.load(*newId);
+          sessionId_ = *newId;
+          messages.clear();
+          replView.clearMessages();
+          if (data) {
+            messages = std::move(data->messages);
+            for (const auto& msg : messages) {
+              if (msg.role == Role::User) {
+                replView.appendMessage({assistantText(msg), true, false});
+              } else if (msg.role == Role::Assistant) {
+                std::string text = assistantText(msg);
+                if (!text.empty())
+                  replView.appendMessage({text, false, false});
+              }
+            }
+          }
+          replView.appendMessage({"[已切换到会话 " + *newId + "]", false, false});
+        }
+        // 仅在 worker 确认已退出时复位 cancel；若仍在跑则不碰（防止它
+        // 读到 false 后继续写 messages 污染新会话数据）。
+        if (!taskRunning_->load())
+          cancel_->store(false);
+        return;
+      }
       if (outcome.result == CommandResult::Reloaded)
       {
         // 刷新补全菜单（router.commands() 现在含新发现的技能）。
@@ -151,7 +198,9 @@ namespace aicoder
       auto storePtr = &store;
       std::string sid = sessionId_;
       std::string model = model_;
+      auto taskRunning = taskRunning_;
       pool.submit([=]() {
+      taskRunning->store(true);
       try {
         auto onDelta = [rv](const StreamDelta& d) {
           rv->appendDelta(d.text, d.reasoning);
@@ -191,7 +240,8 @@ namespace aicoder
       std::string now = nowIsoLocal();
       d.created_at = existing ? existing->created_at : now;
       d.updated_at = now;
-      storePtr->save(sid, d); });
+      storePtr->save(sid, d);
+      taskRunning->store(false); });
     }
   };
 

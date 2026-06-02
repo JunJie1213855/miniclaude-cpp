@@ -26,6 +26,8 @@ public:
   std::optional<SessionData> load(const std::string& id);
   std::vector<SessionInfo> listSessions() const;
   std::optional<std::string> latestId() const;
+  // 删除会话目录，返回 true 表示成功删除。
+  bool remove(const std::string& id);
 
   const std::filesystem::path& root() const { return root_; }
 

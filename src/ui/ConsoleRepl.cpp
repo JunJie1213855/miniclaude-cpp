@@ -35,6 +35,11 @@ namespace aicoder
         out_ << cr.prompt << "\n";
         continue;
       }
+      if (cr.result == CommandResult::Sessions)
+      {
+        out_ << "[会话切换仅在 TUI 模式下可用]\n";
+        continue;
+      }
 
       messages_.push_back(userText(cr.result == CommandResult::Prompt ? cr.prompt : line));
       try

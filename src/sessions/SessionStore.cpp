@@ -109,4 +109,12 @@ std::optional<std::string> SessionStore::latestId() const {
   return list.front().id;
 }
 
+bool SessionStore::remove(const std::string& id) {
+  std::error_code ec;
+  fs::path dir = root_ / id;
+  if (!fs::is_directory(dir, ec)) return false;
+  fs::remove_all(dir, ec);
+  return !ec;
+}
+
 }  // namespace aicoder

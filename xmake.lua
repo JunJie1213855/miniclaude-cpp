@@ -54,6 +54,7 @@ target("aicoder")
              "src/ui/App.cpp",
              "src/ui/ReplView.cpp",
              "src/ui/ResumePicker.cpp",
+             "src/ui/SessionPicker.cpp",
              "src/ui/Welcome.cpp",
              "src/ui/PermissionDialog.cpp")
     add_deps("aicoder_core", "ftxui-component")

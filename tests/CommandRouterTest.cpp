@@ -35,6 +35,13 @@ TEST(CommandRouter, ExitIsAliasOfQuit) {
   EXPECT_EQ(r.handle("/exit", msgs).result, CommandResult::Quit);
 }
 
+TEST(CommandRouter, SessionsReturnsSessions) {
+  CommandRouter r;
+  std::vector<Message> msgs;
+  EXPECT_EQ(r.handle("/sessions", msgs).result, CommandResult::Sessions);
+  EXPECT_TRUE(msgs.empty());  // 不修改 messages
+}
+
 TEST(CommandRouter, TolerantToSurroundingWhitespace) {
   CommandRouter r;
   std::vector<Message> msgs;
