@@ -695,6 +695,9 @@ namespace aicoder
   public:
     ftxui::Component component;
     ftxui::Component input;
+    // 底部互斥容器,放 input 和 permission 的 Maybe 包装。
+    // 注意:它的子节点在 waitForPermission 时被动态替换。
+    ftxui::Component inputArea_;
     ftxui::ScreenInteractive *screen = nullptr;
     std::vector<UIMessage> messages_;
     std::string input_text_;
@@ -722,8 +725,11 @@ namespace aicoder
     // 三态选择结果(替代旧 bool)。UI 通过 PermissionDialog 写入。
     PermissionChoice permissionResult_ = PermissionChoice::Deny;
     // 弹窗的请求 + Dialog 实例(TUI 端),由 waitForPermission 投递后构造。
+    // Dialog 自身继承 ComponentBase,以 Component 形式持有便于
+    // 接入 ftxui Component 树(Maybe / 焦点路由)。
     PermissionRequest permissionRequest_;
-    std::unique_ptr<PermissionDialog> permissionDialog_;
+    ftxui::Component permissionComponent_;     // Maybe 包装后的(放进 inputArea_)
+    ftxui::Component permissionDialogRaw_;     // 原始 dialog(查 Finished/Result 用)
     // 用户选 "Yes, and never ask again" 时回调 —— App 层在此写 PermissionStore。
     ReplView::AllowForeverCallback allowForeverCallback_;
     // 持久化放行查询(命中则不进弹窗)。可选。
@@ -750,7 +756,13 @@ namespace aicoder
       };
       input = ftxui::Input(&input_text_, "input message, enter to send...", input_opt);
 
-      auto container = ftxui::Container::Vertical({input});
+      // 底部互斥容器:input 和 permission 的 Maybe 包装作为它的子节点。
+      // 平时只 input 可见(permission Maybe=false → 空 Node),pending 时反过来。
+      // 子节点在 waitForPermission 时替换为真正 dialog 的 Maybe 包装。
+      inputArea_ = ftxui::Container::Vertical({});
+      inputArea_->Add(ftxui::Maybe(input, [this] { return !permissionPending_; }));
+
+      auto container = ftxui::Container::Vertical({inputArea_});
 
       component = ftxui::Renderer(container, [this]
                                   {
@@ -853,20 +865,8 @@ namespace aicoder
       int nowLine = static_cast<int>(std::round(scroll_pos_ * totalLines_));
       if (totalLines_ == 0) nowLine = 0;
 
-      // Permission confirmation overlay —— Modal 弹窗。
-      // 弹窗期间,layout 下面会把 input 框隐藏,所有键盘事件
-      // 走 PermissionDialog::OnEvent,直到 finished_。
-      // 注意:这里用 Render() 拿一个静态 element(事件路由在 CatchEvent)。
-      if (permissionPending_ && permissionDialog_) {
-        // 把弹窗放在消息区**之前**,以免被 yframe 截断。
-        // 但又必须保证不破坏 layout 顺序:这里在 els 顶部插入,然后
-        // 后面整体仍走 yframe;若内容超长 yframe 会滚动。
-        ftxui::Elements dialogEls;
-        dialogEls.push_back(permissionDialog_->Render());
-        // 弹窗前后各留一行空
-        els.insert(els.begin(), ftxui::text(""));
-        els.insert(els.begin(), ftxui::vbox(std::move(dialogEls)) | ftxui::color(ftxui::Color::Default));
-      }
+      // Permission 弹窗:不在这里 push。改在 layout 底部与 input 互斥显示
+      // (见下方 Maybe 包装)。这里只统计消息区行数,不影响渲染。
 
       auto messages_area = ftxui::vbox(std::move(els)) |
                            ftxui::focusPositionRelative(0.0f, scroll_pos_) |
@@ -877,7 +877,7 @@ namespace aicoder
       layout.push_back(welcomeScreen() | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN, 14));
       layout.push_back(ftxui::separator());
       layout.push_back(messages_area);
-      layout.push_back(ftxui::separator());  // 上分隔线
+      layout.push_back(ftxui::separator() | ftxui::color(ftxui::Color::GrayDark));  // 灰色上分隔线
       // 命令补全菜单：输入以 / 开头时浮现在输入框上方，↑↓ 选择，Tab 补全。
       {
         auto comps = completions();
@@ -897,23 +897,24 @@ namespace aicoder
           layout.push_back(ftxui::vbox(std::move(items)) | ftxui::border);
         }
       }
-      // 输入区夹在上下分隔线之间：给真实高度 + 垂直居中，文字上下自然留白、不紧凑，
-      // 用元素自身高度撑开，而不是插入空行占位。
-      // 输入行：只有 》 + 输入区，不再挤模式标签。
-      // Modal 弹窗期间:input 框隐藏,键盘焦点完全交给 PermissionDialog。
+      // 底部互斥区(input vs permission dialog):
+      //   * 极简紧凑:顶线(灰色) + 一行 "> prompt + input",共 2 行。
+      //   * permission 期间:由 PermissionDialog 自己的 window 边框负责 UI。
+      // 不要在外面套 size(HEIGHT, EQUAL, 3) —— 那样去掉边框后会留
+      // 大块空白行。input 组件本身就是单行,直接给它 hbox 即可。
+      ftxui::Element bottomEl;
       if (!permissionPending_) {
-        layout.push_back(
-            ftxui::hbox({ ftxui::text("》 "), input->Render() })
-                | ftxui::vcenter
-                | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kInputBoxHeight));
+        bottomEl = ftxui::hbox({
+                        ftxui::text("❯ ") | ftxui::color(ftxui::Color::White),
+                        inputArea_->Render(),
+                    });
       } else {
-        // 占位:维持 3 行高度,让弹窗/状态行不抖动
-        layout.push_back(
-            ftxui::hbox({ ftxui::text(" ") })
-                | ftxui::vcenter
-                | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kInputBoxHeight) | ftxui::dim);
+        // 权限弹窗:由 PermissionDialog 自带的 window 边框呈现。
+        // 不要在这里再包任何 border/window/dbox(那会重复套框)。
+        bottomEl = inputArea_->Render() | ftxui::xflex;
       }
-      layout.push_back(ftxui::separator());  // 输入区与状态行之间的分隔线
+      layout.push_back(bottomEl);
+      layout.push_back(ftxui::separator() | ftxui::color(ftxui::Color::GrayDark));  // 灰色下分隔线
       // 状态提示行：模式标签单独一行、靠左对齐（前置空格留点边距）。下方不再加分隔线，
       // 状态行即一个独立的单行容器，直接紧贴 App 外边框。
       // 反思=绿色加粗、计划=青色加粗、普通=变暗。
@@ -932,14 +933,20 @@ namespace aicoder
 
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
                                     {
-      if (permissionPending_ && permissionDialog_) {
-        // Modal:全部事件交给 PermissionDialog(方向键/Enter/Esc/Tab)。
+      if (permissionPending_ && permissionComponent_) {
+        // Modal:全部事件交给 PermissionDialog Component(方向键/Enter/Esc/Tab)。
         // 它"已 finished"则向上 return false 触发通知流程。
-        if (permissionDialog_->OnEvent(e)) {
-          if (permissionDialog_->Finished()) {
-            grantPermission(permissionDialog_->Result());
-            // 把 dialog 析构,让"pending"翻 false,input 框恢复显示
-            permissionDialog_.reset();
+        // 通过 Maybe 包装的事件自动转发:permissionComponent_->OnEvent
+        // 实际会调到内层 dialog->OnEvent。
+        if (permissionComponent_ && permissionComponent_->OnEvent(e)) {
+          // OnEvent 已处理 → 检查是否已 finished,若是则回写结果并释放 Component。
+          if (auto dlg = std::dynamic_pointer_cast<PermissionDialog>(permissionDialogRaw_)) {
+            if (dlg->Finished()) {
+              grantPermission(dlg->Result());
+              // 释放两个引用 → pending 翻 false → input 重新 Maybe 可见
+              permissionComponent_.reset();
+              permissionDialogRaw_.reset();
+            }
           }
           return true;
         }
@@ -1080,9 +1087,23 @@ namespace aicoder
                        {
           // 投递到 UI 线程:实例化弹窗、置 pending 标志、强制重绘。
           permissionRequest_ = req;
-          permissionDialog_ = std::make_unique<PermissionDialog>(permissionRequest_);
-          permissionPending_ = true; });
-          screen->PostEvent(ftxui::Event::Custom);
+          // 真正弹窗:替换 stub。Container::Tab 的 children 必须稳定(stub_ 槽位),
+          // Make 真正弹窗 + 用 Maybe 包装(pending=true 才可见)。
+          // 加进 inputArea_ 容器,实现物理空间互斥(input 与 dialog
+          // 都进 inputArea_ 的 children,各自 Maybe 控制显隐)。
+          permissionDialogRaw_ = ftxui::Make<PermissionDialog>(permissionRequest_);
+          permissionComponent_ = ftxui::Maybe(
+              permissionDialogRaw_,
+              [this] { return permissionPending_; });
+          if (inputArea_) {
+            inputArea_->DetachAllChildren();
+            inputArea_->Add(ftxui::Maybe(this->input, [this] { return !permissionPending_; }));
+            inputArea_->Add(permissionComponent_);
+          }
+          permissionPending_ = true;
+          // 让 dialog 拿焦点(沿 parent 链通知 active)
+          if (permissionDialogRaw_) permissionDialogRaw_->TakeFocus();
+          screen->PostEvent(ftxui::Event::Custom); });
         }
       }
 

@@ -58,7 +58,7 @@ namespace aicoder
         // "标题 + 一整圈外框" 的双层效果。
         // 宽度自适应:取父容器宽度减 1(因为手动画了 '┐')。
         Element title = hbox({
-                            text(" ┌─ AICoder v1.0.256 "),
+                            text(" ┌─ AICoder v0.0.1 "),
                             filler(),
                             text("┐"),
                         }) |
