@@ -1,0 +1,31 @@
+# Build output
+build/
+.xmake/
+
+# CodeGraph index
+.codegraph/
+
+# IDE / editor
+.claude/
+
+# Temp files
+test.txt
+tasktest/
+config.ini
+
+# Generated docs (working files, not source)
+arch.md
+mdrender*.md
+rendercodeblock.md
+rendertheme.md
+task.md
+
+# Images
+*.png
+*.jpg
+*.bmp
+pixel-evolution.png
+
+# User-specific data (session state)
+.aicoder/
+refagent

@@ -1,0 +1,7 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=@LIB_INSTALL_DIR@
+includedir=@CMAKE_INSTALL_INCLUDEDIR@
+Name: ftxui
+Description: Functional Terminal UI library
+Version: @FTXUI_VERSION@
+Libaries: ${CMAKE_INSTALL_LIBS_INTERFACE}
