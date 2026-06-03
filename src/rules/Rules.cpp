@@ -1,10 +1,11 @@
 #include "rules/Rules.h"
 #include "workspace/Workspace.h"
 
-namespace aicoder {
-namespace fs = std::filesystem;
+namespace aicoder
+{
+  namespace fs = std::filesystem;
 
-const char* const kBaseSystemPrompt = R"(
+  const char *const kBaseSystemPrompt = R"(
 你是 AICoder，一个运行在命令行的编码助手。
 
 ## 可用工具
@@ -64,39 +65,52 @@ std::vector<std::string> calculateResults(const std::string& input, int flags) {
 ```
 )";
 
-std::string concatSources(const std::vector<fs::path>& sources) {
-  std::string out;
-  auto append = [&](const std::string& s) {
-    if (s.empty()) return;
-    if (!out.empty()) out += "\n\n";
-    out += s;
-  };
-  for (const auto& src : sources) {
-    std::error_code ec;
-    if (fs::is_directory(src, ec)) {
-      for (const auto& md : listMarkdown(src))
-        if (auto c = readFile(md)) append(*c);
-    } else if (auto c = readFile(src)) {
-      append(*c);
+  std::string concatSources(const std::vector<fs::path> &sources)
+  {
+    std::string out;
+    auto append = [&](const std::string &s)
+    {
+      if (s.empty())
+        return;
+      if (!out.empty())
+        out += "\n\n";
+      out += s;
+    };
+    for (const auto &src : sources)
+    {
+      std::error_code ec;
+      if (fs::is_directory(src, ec))
+      {
+        for (const auto &md : listMarkdown(src))
+          if (auto c = readFile(md))
+            append(*c);
+      }
+      else if (auto c = readFile(src))
+      {
+        append(*c);
+      }
     }
+    return out;
   }
-  return out;
-}
 
-std::string loadRules(const fs::path& globalDir, const fs::path& projectRoot) {
-  return concatSources({
-      globalDir / "CLAUDE.md",
-      globalDir / "rules",
-      projectRoot / "CLAUDE.md",
-      projectRoot / ".aicoder" / "rules",
-  });
-}
+  std::string loadRules(const fs::path &globalDir, const fs::path &projectRoot)
+  {
+    return concatSources({
+        globalDir / "CLAUDE.md",
+        globalDir / "rules",
+        projectRoot / "CLAUDE.md",
+        projectRoot / ".aicoder" / "rules",
+    });
+  }
 
-std::string buildSystemPrompt(const std::string& base, const std::string& rules,
-                              const std::string& skillList) {
-  std::string out = base;
-  if (!rules.empty()) out += "\n\n" + rules;
-  if (!skillList.empty()) out += "\n\n## 可用技能\n" + skillList;
-  return out;
-}
-}  // namespace aicoder
+  std::string buildSystemPrompt(const std::string &base, const std::string &rules,
+                                const std::string &skillList)
+  {
+    std::string out = base;
+    if (!rules.empty())
+      out += "\n\n" + rules;
+    if (!skillList.empty())
+      out += "\n\n## 可用技能\n" + skillList;
+    return out;
+  }
+} // namespace aicoder

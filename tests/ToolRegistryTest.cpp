@@ -72,3 +72,49 @@ TEST(ToolRegistry, NeedsPermissionQuery) {
   EXPECT_TRUE(r.needsPermission("danger"));
   EXPECT_FALSE(r.needsPermission("nonexistent"));  // 未知工具 → false
 }
+
+TEST(ToolRegistry, FilterIncludesNamedTools) {
+  ToolRegistry r;
+  r.registerTool(okTool());
+  Tool echo2 = okTool();
+  echo2.name = "echo2";
+  r.registerTool(echo2);
+
+  ToolRegistry filtered = r.filter({"echo"});
+  auto specs = filtered.specs();
+  ASSERT_EQ(specs.size(), 1u);
+  EXPECT_EQ(specs[0].name, "echo");
+}
+
+TEST(ToolRegistry, FilterExcludesUnnamedTools) {
+  ToolRegistry r;
+  r.registerTool(okTool());
+  Tool echo2 = okTool();
+  echo2.name = "echo2";
+  r.registerTool(echo2);
+
+  ToolRegistry filtered = r.filter({"echo"});
+  EXPECT_FALSE(filtered.has("echo2"));
+  EXPECT_TRUE(filtered.has("echo"));
+}
+
+TEST(ToolRegistry, FilterPreservesToolCallbacks) {
+  ToolRegistry r;
+  r.registerTool(okTool());
+
+  ToolRegistry filtered = r.filter({"echo"});
+  ToolResultBlock res = filtered.invoke("u1", "echo", json{{"text", "filtered"}});
+  EXPECT_FALSE(res.is_error);
+  EXPECT_EQ(res.content, "filtered");
+}
+
+TEST(ToolRegistry, FilterPreservesNeedsPermission) {
+  ToolRegistry r;
+  Tool danger = okTool();
+  danger.name = "danger";
+  danger.needsPermission = true;
+  r.registerTool(danger);
+
+  ToolRegistry filtered = r.filter({"danger"});
+  EXPECT_TRUE(filtered.needsPermission("danger"));
+}

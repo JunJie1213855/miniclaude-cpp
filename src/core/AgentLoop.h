@@ -57,6 +57,8 @@ namespace aicoder
 
     // 运行时切换"每步工具自检"(供 UI 模式切换调用)。
     void setSelfCheck(bool v) { selfCheck_ = v; }
+    // 暴露底层 LLM 客户端(用于 /create_* 这类需要直接调 LLM 的辅助流程)。
+    LlmClient &client() { return client_; }
     // 工具调用观察回调:每次工具执行后触发,向 UI 报告调了什么工具、参数、结果及是否出错。
     // 对 run / runWithReflection / runPlanExecute 三种模式统一生效(都复用 run 的工具循环)。
     using ToolCallCallback = std::function<void(const std::string &name, const json &input,

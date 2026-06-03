@@ -11,7 +11,7 @@ namespace aicoder
   class ToolRegistry
   {
   public:
-    using PermissionCallback = std::function<bool(const std::string& toolName, const json& input)>;
+    using PermissionCallback = std::function<bool(const std::string &toolName, const json &input)>;
 
     void registerTool(Tool tool);
     bool has(const std::string &name) const;
@@ -25,6 +25,8 @@ namespace aicoder
     ToolResultBlock invoke(const std::string &toolUseId,
                            const std::string &name,
                            const json &input) const;
+
+    ToolRegistry filter(const std::vector<std::string>& names) const;
 
   private:
     std::map<std::string, Tool> tools_;

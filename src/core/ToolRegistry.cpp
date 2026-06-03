@@ -1,5 +1,6 @@
 #include "core/ToolRegistry.h"
 #include "core/Errors.h"
+#include <unordered_set>
 
 namespace aicoder {
 
@@ -51,6 +52,17 @@ ToolResultBlock ToolRegistry::invoke(const std::string& toolUseId,
   } catch (const ToolError& e) {
     return ToolResultBlock{toolUseId, std::string("tool error: ") + e.what(), true};
   }
+}
+
+ToolRegistry ToolRegistry::filter(const std::vector<std::string>& names) const {
+  ToolRegistry result;
+  std::unordered_set<std::string> nameSet(names.begin(), names.end());
+  for (const auto& [name, tool] : tools_) {
+    if (nameSet.find(name) != nameSet.end()) {
+      result.registerTool(tool);
+    }
+  }
+  return result;
 }
 
 }

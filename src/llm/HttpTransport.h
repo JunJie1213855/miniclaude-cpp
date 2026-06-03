@@ -1,18 +1,20 @@
 #pragma once
 #include "llm/Transport.h"
 
-namespace aicoder {
-class HttpTransport : public Transport {
-public:
-  HttpTransport();   // 首次构造时一次性 curl_global_init
-  HttpResponse post(const std::string& url,
-                    const std::string& body,
-                    const std::vector<std::string>& headers,
-                    const std::atomic<bool>* cancel = nullptr) override;
-  HttpResponse postStream(const std::string& url,
-                          const std::string& body,
-                          const std::vector<std::string>& headers,
-                          const ChunkCallback& onChunk,
-                          const std::atomic<bool>* cancel = nullptr) override;
-};
+namespace aicoder
+{
+  class HttpTransport : public Transport
+  {
+  public:
+    HttpTransport(); // 首次构造时一次性 curl_global_init
+    HttpResponse post(const std::string &url,
+                      const std::string &body,
+                      const std::vector<std::string> &headers,
+                      const std::atomic<bool> *cancel = nullptr) override;
+    HttpResponse postStream(const std::string &url,
+                            const std::string &body,
+                            const std::vector<std::string> &headers,
+                            const ChunkCallback &onChunk,
+                            const std::atomic<bool> *cancel = nullptr) override;
+  };
 }

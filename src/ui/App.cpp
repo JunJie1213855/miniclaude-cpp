@@ -9,7 +9,14 @@
 #include "llm/StreamDelta.h"
 #include "sessions/Session.h"
 #include "sessions/SessionStore.h"
+#include "skills/SkillRegistry.h"
+#include "subagent/SubAgentRegistry.h"
+#include "subagent/SubAgentManager.h"
+#include "subagent/SubAgentTask.h"
 #include "ui/ResumePicker.h"
+#include "commands/CreateCommands.h"
+#include "commands/ResourceGenerator.h"
+#include "workspace/Workspace.h"
 #include "util/ThreadPool.h"
 #include "ftxui/screen/screen.hpp"
 #include "ftxui/component/component.hpp"
@@ -18,6 +25,7 @@
 
 #include <chrono>
 #include <ctime>
+#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <thread>
@@ -60,10 +68,16 @@ namespace aicoder
     ReplView replView;
     std::shared_ptr<std::atomic<bool>> cancel_;
     std::shared_ptr<std::atomic<bool>> taskRunning_;
+    SubAgentManager* subAgentManager_ = nullptr;
+    SubAgentRegistry* subAgentReg_ = nullptr;
+    SkillRegistry* skillReg_ = nullptr;
+    std::string systemPrompt_;
 
-    Impl(AgentLoop &loop, CommandRouter &router, std::vector<Message> initialMsgs,
+    Impl(AgentLoop &loop, CommandRouter &router, const std::string& systemPrompt,
+         std::vector<Message> initialMsgs,
          SessionStore &store, std::string sid, std::string m)
         : agentLoop(loop), router(router),
+          systemPrompt_(systemPrompt),
           messages(std::move(initialMsgs)),
           store(store), sessionId_(std::move(sid)), model_(std::move(m)),
           replView([this](const std::string &input)
@@ -114,6 +128,220 @@ namespace aicoder
       });
 
       router.setSessionsCallback([this] { onSessionsCommand(); });
+    }
+
+    void setSubAgentRegistry(SubAgentRegistry* reg) {
+      subAgentReg_ = reg;
+    }
+
+    void setSkillRegistry(SkillRegistry* reg) {
+      skillReg_ = reg;
+    }
+
+    void onAgentsCommand() {
+      replView.appendMessage({"[可用子代理]", false, false});
+      if (!subAgentReg_ || subAgentReg_->empty()) {
+        replView.appendMessage({"(无可用子代理，请在 ~/.aicoder/agents/ 下创建 AGENT.md)", false, false});
+        return;
+      }
+      for (const auto& def : subAgentReg_->list()) {
+        std::string line = def.name + " — " + def.description;
+        replView.appendMessage({line, false, false});
+      }
+      replView.appendMessage({"[用法: /agent <名称> <任务描述> 或直接对话中指定子代理]", false, false});
+    }
+
+    void onSkillsCommand() {
+      replView.appendMessage({"[可用技能]", false, false});
+      if (!skillReg_) {
+        replView.appendMessage({"(技能系统未初始化)", false, false});
+        return;
+      }
+      auto skills = skillReg_->list();
+      if (skills.empty()) {
+        replView.appendMessage({"(无可用技能，请在 ~/.aicoder/skills/ 下创建 SKILL.md)", false, false});
+        return;
+      }
+      for (const auto& s : skills) {
+        std::string line = s.name + " — " + s.description;
+        replView.appendMessage({line, false, false});
+      }
+      replView.appendMessage({"[用法: /<技能名> 直接调用]", false, false});
+    }
+
+    // 注册"资源被创建出来后,需要做的副作用":(向 registry 加一项 /
+    // 注入命令 / 拼到 system prompt)。worker 与快速路径都会调用,放在
+    // handleCreateCommand 之外以复用。
+    enum class CreatePost { AddSkill, InjectCommand, AddAgent, AppendRule };
+
+    // 在调用方决定方向后,把资源注册到对应 registry。
+    // 必须线程安全:在快速路径(UI 线程)和 worker 线程都会被调用。
+    // 这些 registry 内部走 std::mutex 或单写者,直接调用即可。
+    void applyCreatePost(const CreateOutcome &r, CreatePost post)
+    {
+      if (!r.error.empty())
+        return;
+      switch (post)
+      {
+        case CreatePost::AddSkill:
+          if (skillReg_) skillReg_->addOne(r.path);
+          break;
+        case CreatePost::InjectCommand:
+          router.injectCommand(CommandTemplate{r.name, r.description, r.body});
+          break;
+        case CreatePost::AddAgent:
+          if (subAgentReg_) subAgentReg_->addOne(r.path);
+          break;
+        case CreatePost::AppendRule:
+          systemPrompt_ += "\n\n" + r.body;
+          break;
+      }
+    }
+
+    void refreshCommandMenu()
+    {
+      std::vector<std::pair<std::string, std::string>> cmds;
+      for (const auto &c : router.commands())
+        cmds.push_back({c.name, c.description});
+      replView.setCommands(std::move(cmds));
+    }
+
+    void handleCreateCommand(const std::string &cmd, const std::string &arg) {
+      namespace fs = std::filesystem;
+
+      // 1) 解析用户输入 → {name, description, body}
+      auto parsed = parseCreateArgs(arg);
+      if (!parsed) {
+        replView.appendMessage({"[缺少名称]", false, false});
+        return;
+      }
+
+      // 2) 映射到具体的资源种类、目录、工厂、注册动作
+      std::string kind;       // 传给 generateResource 用
+      fs::path dir;           // 写入目录
+      // 工厂函数指针:接 (name, desc, body, dir) → CreateOutcome
+      using FactoryFn = std::function<CreateOutcome(const std::string &,
+                                                    const std::string &,
+                                                    const std::string &,
+                                                    const fs::path &)>;
+      FactoryFn factory;
+      CreatePost post{};
+
+      if (cmd == "/create_skill") {
+        kind = "skill"; dir = globalDir() / "skills";
+        factory = [](const std::string &n, const std::string &d,
+                     const std::string &b, const fs::path &p) { return createSkill(n, d, b, p); };
+        post = CreatePost::AddSkill;
+      } else if (cmd == "/create_command") {
+        kind = "command"; dir = globalDir() / "commands";
+        factory = [](const std::string &n, const std::string &d,
+                     const std::string &b, const fs::path &p) { return createCommand(n, d, b, p); };
+        post = CreatePost::InjectCommand;
+      } else if (cmd == "/create_agent") {
+        kind = "agent"; dir = globalDir() / "agents";
+        factory = [](const std::string &n, const std::string &d,
+                     const std::string &b, const fs::path &p) { return createAgent(n, d, b, p); };
+        post = CreatePost::AddAgent;
+      } else if (cmd == "/create_rule") {
+        kind = "rule"; dir = globalDir() / "rules";
+        factory = [](const std::string &n, const std::string &d,
+                     const std::string &b, const fs::path &p) { return createRule(n, d, b, p); };
+        post = CreatePost::AppendRule;
+      } else {
+        replView.appendMessage({"[未知 create 命令: " + cmd + "]", false, false});
+        return;
+      }
+
+      // 3) body 非空 → 走快速路径:直接写文件,无 LLM 调用
+      if (!parsed->body.empty()) {
+        CreateOutcome r = factory(parsed->name, parsed->description, parsed->body, dir);
+        if (!r.error.empty()) {
+          replView.appendMessage({r.error, false, false});
+          return;
+        }
+        applyCreatePost(r, post);
+        refreshCommandMenu();
+        replView.appendMessage({r.success, false, false});
+        return;
+      }
+
+      // 4) body 为空 → 派发到线程池调 LLM,避免阻塞 UI
+      std::string name = parsed->name;
+      std::string hint = parsed->description.empty()
+                             ? "user wants a resource named " + name
+                             : parsed->description;
+      replView.setThinking(true);
+
+      // 抓取 worker 所需的指针。router / registries 假定在
+      // 进程内写者单线程化(快速路径发生在 onSubmit 同步段,Llm 调用
+      // 发生在 worker;两者不会同时发生,因为 onSubmit 进入 LLM 段前
+      // 不会派发新的 onSubmit 任务)。systemPrompt_ 在快速路径上由
+      // UI 线程写,worker 路径下我们也只由 worker 写。
+      auto rv = &replView;
+      auto agentLoopPtr = &agentLoop;
+      pool.submit([rv, factory, dir, post, name, hint, kind, agentLoopPtr, this]() {
+        GeneratedResource gr = generateResource(agentLoopPtr->client(), kind, hint, name);
+        if (gr.body.empty()) {
+          rv->appendMessage({"[LLM 未返回内容,无法生成 " + kind + "]", false, false});
+          rv->setThinking(false);
+          return;
+        }
+        // 给用户看一眼 LLM 干了什么(预览前 200 字符)
+        std::string preview = gr.body;
+        if (preview.size() > 200) preview = preview.substr(0, 200) + "…";
+        rv->appendMessage({"[已生成] name=" + gr.name +
+                               ", desc=" + (gr.description.empty() ? "(无)" : gr.description) +
+                               ", body=" + preview,
+                           false, false});
+        CreateOutcome r = factory(gr.name, gr.description, gr.body, dir);
+        if (!r.error.empty()) {
+          rv->appendMessage({r.error, false, false});
+          rv->setThinking(false);
+          return;
+        }
+        // 后置动作(注册/注入/追加到 system prompt)
+        this->applyCreatePost(r, post);
+        // 刷新补全菜单 + 终态
+        this->refreshCommandMenu();
+        rv->appendMessage({r.success, false, false});
+        rv->setThinking(false);
+      });
+    }
+
+    void setSubAgentManager(SubAgentManager* mgr) {
+      subAgentManager_ = mgr;
+      if (mgr) {
+        mgr->setCancelToken(cancel_);
+        mgr->setOnToolCall([this](const std::string& toolName,
+                                  const json& /*input*/,
+                                  const std::string& result,
+                                  bool isError) {
+          std::string display;
+          if (isError) {
+            display = "[子代理错误] " + toolName + ": " + result;
+          } else {
+            display = "[子代理] " + toolName + " ✓";
+          }
+          replView.appendMessage({display, false, false});
+        });
+        mgr->setUiNotify([this](const SubAgentTaskInfo& info) {
+          std::string line;
+          switch (info.status) {
+            case SubAgentTaskStatus::Completed:
+              line = "[后台子代理 " + info.agent_name + " 完成 (" + info.task_id + ")]";
+              break;
+            case SubAgentTaskStatus::Cancelled:
+              line = "[后台子代理 " + info.agent_name + " 已取消 (" + info.task_id + ")]";
+              break;
+            case SubAgentTaskStatus::Failed:
+              line = "[后台子代理 " + info.agent_name + " 失败 (" + info.task_id + "): " + info.error + "]";
+              break;
+            default:
+              return;
+          }
+          replView.appendMessage({line, false, false});
+        });
+      }
     }
 
     void saveTurn() {
@@ -168,6 +396,21 @@ namespace aicoder
       // 无法通过纯函数 CommandRouter 完成，在此直接拦截。
       if (input == "/sessions") {
         onSessionsCommand();
+        return;
+      }
+      if (input == "/agents") {
+        onAgentsCommand();
+        return;
+      }
+      if (input == "/skills") {
+        onSkillsCommand();
+        return;
+      }
+      if (input.rfind("/create_", 0) == 0) {
+        size_t sp = input.find(' ');
+        std::string cmd = sp == std::string::npos ? input : input.substr(0, sp);
+        std::string arg = sp == std::string::npos ? "" : input.substr(sp + 1);
+        handleCreateCommand(cmd, arg);
         return;
       }
       auto outcome = router.handle(input, messages);
@@ -254,13 +497,25 @@ namespace aicoder
     }
   };
 
-  App::App(AgentLoop &loop, CommandRouter &router, const std::string& /*systemPrompt*/,
+  App::App(AgentLoop &loop, CommandRouter &router, const std::string& systemPrompt,
            SessionStore& store, std::string initialSessionId,
            std::vector<Message> initialMessages, std::string model)
-      : impl_(std::make_unique<Impl>(loop, router, std::move(initialMessages),
+      : impl_(std::make_unique<Impl>(loop, router, systemPrompt, std::move(initialMessages),
                                      store, std::move(initialSessionId), std::move(model))) {}
 
   App::~App() = default;
+
+  void App::setSubAgentManager(SubAgentManager* mgr) {
+    impl_->setSubAgentManager(mgr);
+  }
+
+  void App::setSubAgentRegistry(SubAgentRegistry* reg) {
+    impl_->setSubAgentRegistry(reg);
+  }
+
+  void App::setSkillRegistry(SkillRegistry* reg) {
+    impl_->setSkillRegistry(reg);
+  }
 
   void App::run()
   {

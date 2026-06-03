@@ -25,6 +25,16 @@ void SkillRegistry::discover(const fs::path& globalDir, const fs::path& projectD
   loadDir(globalDir, skills_);
   loadDir(projectDir, skills_);
 }
+void SkillRegistry::addOne(const fs::path& skillMdFile) {
+  auto content = readFile(skillMdFile);
+  if (!content) return;
+  Frontmatter fm = parseFrontmatter(*content);
+  SkillInfo s;
+  s.name = fm.meta.count("name") ? fm.meta.at("name") : skillMdFile.parent_path().filename().string();
+  s.description = fm.meta.count("description") ? fm.meta.at("description") : "";
+  s.body = fm.body;
+  skills_[s.name] = std::move(s);
+}
 const SkillInfo* SkillRegistry::find(const std::string& name) const {
   auto it = skills_.find(name);
   return it == skills_.end() ? nullptr : &it->second;

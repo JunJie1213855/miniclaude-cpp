@@ -76,6 +76,13 @@ namespace aicoder
     std::string block = content.substr(4, end - 4);
     size_t bodyStart = content.find('\n', end + 1);
     fm.body = (bodyStart == std::string::npos) ? "" : content.substr(bodyStart + 1);
+    // Drop the conventional blank line that follows the closing '---' (if any),
+    // but preserve any subsequent content verbatim (incl. trailing newline).
+    size_t lead = fm.body.find_first_not_of(" \t\r\n");
+    if (lead == std::string::npos)
+      fm.body.clear();
+    else
+      fm.body.erase(0, lead);
     std::istringstream is(block);
     std::string line;
     while (std::getline(is, line))

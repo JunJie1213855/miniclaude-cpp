@@ -64,18 +64,18 @@ target_include_directories(aicoder_core BEFORE PUBLIC
 target_link_libraries(aicoder_core PUBLIC CURL::libcurl Threads::Threads)
 # PermissionDialog.h is included by sources compiled into aicoder_core and pulls in
 # ftxui/dom/elements.hpp, so FTXUI's include path must reach aicoder_core's own TUs.
-# PUBLIC propagates the include path to aicoder_tui (the only link dependent now).
+# PUBLIC propagates the include path to aicoder (the only link dependent now).
 target_link_libraries(aicoder_core PUBLIC ftxui::component)
 
 # TUI 可执行(依赖 aicoder_core + FTXUI) —— 唯一可执行入口
-add_executable(aicoder_tui "${PROJECT_SOURCE_DIR}/src/main.cpp"
+add_executable(aicoder "${PROJECT_SOURCE_DIR}/src/main.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/App.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/MarkdownTable.cpp")
-target_link_libraries(aicoder_tui PRIVATE aicoder_core ftxui::component)
-target_include_directories(aicoder_tui PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(aicoder PRIVATE aicoder_core ftxui::component)
+target_include_directories(aicoder PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 file(GLOB_RECURSE AICODER_TEST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/tests/*.cpp")
 add_executable(aicoder_tests ${AICODER_TEST_SOURCES}

@@ -18,6 +18,9 @@ public:
       std::vector<Message> initialMessages, std::string model);
   ~App();
   void run();
+  void setSubAgentManager(class SubAgentManager* mgr);
+  void setSubAgentRegistry(class SubAgentRegistry* reg);
+  void setSkillRegistry(class SkillRegistry* reg);
 
 private:
   class Impl;

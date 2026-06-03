@@ -92,7 +92,13 @@ namespace aicoder
         {"/quit", "退出"},
         {"/clear", "清空对话"},
         {"/sessions", "查看并切换历史会话"},
-        {"/reload-skills", "重新加载技能"}};
+        {"/agents", "查看可用子代理"},
+        {"/skills", "查看可用技能"},
+        {"/reload-skills", "重新加载技能"},
+        {"/create_skill",   "在 ~/.aicoder/skills/ 创建技能"},
+        {"/create_command", "在 ~/.aicoder/commands/ 创建命令"},
+        {"/create_agent",   "在 ~/.aicoder/agents/ 创建子代理"},
+        {"/create_rule",    "在 ~/.aicoder/rules/ 创建规则"}};
     for (const auto &t : registry_.list())
       out.push_back({"/" + t.name, t.description});
     if (skills_)

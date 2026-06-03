@@ -39,6 +39,7 @@ namespace aicoder
     CommandOutcome handle(const std::string &input, std::vector<Message> &messages) const;
     std::vector<CommandInfo> commands() const;
     void setSessionsCallback(SessionsCallback cb) { sessionsCallback_ = std::move(cb); }
+    void injectCommand(CommandTemplate t) { registry_.addOne(t); }
 
   private:
     CommandRegistry registry_;

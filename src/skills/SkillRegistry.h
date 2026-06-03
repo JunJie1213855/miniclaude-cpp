@@ -9,6 +9,7 @@ class SkillRegistry {
 public:
   void discover(const std::filesystem::path& globalDir,
                 const std::filesystem::path& projectDir);
+  void addOne(const std::filesystem::path& skillMdFile);
   const SkillInfo* find(const std::string& name) const;
   std::vector<SkillInfo> list() const;
   std::string promptList() const;  // "- name: description\n" lines; "" if none

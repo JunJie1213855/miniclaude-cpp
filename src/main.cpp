@@ -2,6 +2,7 @@
 #include <iostream>
 #include "commands/CommandRegistry.h"
 #include "commands/CommandRouter.h"
+#include "commands/CreateResourceTool.h"
 #include "config/Config.h"
 #include "core/AgentLoop.h"
 #include "core/Errors.h"
@@ -17,6 +18,11 @@
 #include "tools/BuiltinTools.h"
 #include "ui/App.h"
 #include "ui/ResumePicker.h"
+#include "subagent/SubAgentManager.h"
+#include "subagent/SubAgentRegistry.h"
+#include "subagent/SubAgentResultTool.h"
+#include "subagent/SubAgentStatusTool.h"
+#include "subagent/SubAgentTool.h"
 #include "workspace/Workspace.h"
 
 using namespace aicoder;
@@ -62,10 +68,20 @@ int main(int argc, char** argv) {
                     std::filesystem::current_path() / ".aicoder" / "skills");
   registry.registerTool(makeSkillTool(skillReg));
 
+  static SubAgentRegistry agentReg;
+  agentReg.discover(globalDir() / "agents",
+                    std::filesystem::current_path() / ".aicoder" / "agents");
+
   DefaultLlmClient client(config,
                           std::make_unique<OpenAIProvider>(),
                           std::make_unique<HttpTransport>());
   AgentLoop loop(client, registry, config.max_iterations);
+  static SubAgentManager manager(client, registry, agentReg);
+  if (!agentReg.empty()) {
+    registry.registerTool(makeSubAgentTool(agentReg, manager));
+    registry.registerTool(makeGetSubAgentStatusTool(manager));
+    registry.registerTool(makeGetSubAgentResultTool(manager));
+  }
   CommandRegistry commandReg;
   commandReg.discover(globalDir() / "commands",
                       std::filesystem::current_path() / ".aicoder" / "commands");
@@ -73,10 +89,25 @@ int main(int argc, char** argv) {
                        globalDir() / "skills",
                        std::filesystem::current_path() / ".aicoder" / "skills");
 
+  // 注册 4 个 create_* 工具: LLM 在对话中可主动调用
+  // 注意: 注册时机在 App 创建之前,所以 create_rule 的 system prompt 追加回调
+  // 只写入文件,系统 prompt 集成留给后续 session(v1 接受的折衷)。
+  registry.registerTool(makeCreateSkillTool(client, skillReg));
+  registry.registerTool(makeCreateCommandTool(client, commandReg, router));
+  registry.registerTool(makeCreateAgentTool(client, agentReg));
+  registry.registerTool(makeCreateRuleTool(client, [](const std::string&) {
+    // 规则文件已由工厂写入,系统 prompt 集成留待后续 session 生效。
+  }));
+
   std::string systemPrompt = buildSystemPrompt(
       kBaseSystemPrompt,
       loadRules(globalDir(), std::filesystem::current_path()),
       skillReg.promptList());
+  if (!agentReg.empty()) {
+    systemPrompt += "\n\n## 可用子代理\n" + agentReg.promptList();
+    systemPrompt += "\n\n## 子代理后台运行\n- run_sub_agent 支持 run_in_background: true，立即返回 task_id。\n- get_subagent_status(task_id) 查询状态。\n- get_subagent_result(task_id, wait=true) 阻塞取回结果。\n";
+  }
+  systemPrompt += "\n\n## 资源创建工具\nYou can proactively call create_skill, create_command, create_agent, create_rule during a conversation when you recognize a need for a reusable resource. If body is empty, the system auto-generates content via LLM.\n";
 
   SessionStore sessionStore(globalDir() / "sessions");
   std::string sessionId;
@@ -106,6 +137,9 @@ int main(int argc, char** argv) {
 
   App app(loop, router, systemPrompt, sessionStore, sessionId,
           std::move(initialMessages), config.model);
+  app.setSubAgentManager(&manager);
+  app.setSubAgentRegistry(&agentReg);
+  app.setSkillRegistry(&skillReg);
   app.run();
   return 0;
 }

@@ -27,6 +27,18 @@ namespace aicoder
     loadDir(globalDir, templates_);
     loadDir(projectDir, templates_);
   }
+  void CommandRegistry::addOne(const fs::path &commandMdFile)
+  {
+    auto content = readFile(commandMdFile);
+    if (!content)
+      return;
+    Frontmatter fm = parseFrontmatter(*content);
+    CommandTemplate t;
+    t.name = commandMdFile.stem().string();
+    t.description = fm.meta.count("description") ? fm.meta.at("description") : "";
+    t.body = fm.body;
+    templates_[t.name] = std::move(t);
+  }
   const CommandTemplate *CommandRegistry::find(const std::string &name) const
   {
     auto it = templates_.find(name);

@@ -1,6 +1,7 @@
 #pragma once
 #include <nlohmann/json.hpp>
 
-namespace aicoder {
-using json = nlohmann::json;
+namespace aicoder
+{
+    using json = nlohmann::json;
 }
