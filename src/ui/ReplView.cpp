@@ -14,6 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include "ui/MarkdownTable.h"
 #include <condition_variable>
 #include <sstream>
 
@@ -545,14 +546,112 @@ namespace aicoder
       if (terminalWidth <= 0)
         terminalWidth = 80; // fallback
 
-      std::istringstream stream(markdown);
-      std::string line;
+      // 快速路径：不含 '|' 则不可能有表格，直接用 getline 流式读取，
+      // 避免每次增量渲染都分配 vector（流式输出时每秒触发数十次）。
+      if (markdown.find('|') == std::string::npos) {
+        std::istringstream stream(markdown);
+        std::string line;
+        bool inCodeBlock = false;
+        std::string codeBlockContent;
+        std::string currentLang;
+
+        while (std::getline(stream, line)) {
+          if (isCodeBlockStart(line)) {
+            if (!inCodeBlock) {
+              inCodeBlock = true;
+              codeBlockContent.clear();
+              currentLang = extractCodeLang(line);
+            } else {
+              inCodeBlock = false;
+              ftxui::Elements codeLines;
+              std::istringstream cs(codeBlockContent);
+              std::string cline;
+              int lineNum = 1;
+              while (std::getline(cs, cline)) {
+                std::string numStr = std::to_string(lineNum);
+                int pad = 3 - static_cast<int>(numStr.size());
+                std::string paddedNum(pad, ' ');
+                paddedNum += numStr;
+                ftxui::Element numEl = ftxui::text(paddedNum + " ") | ftxui::color(getTheme().comment) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 4);
+                codeLines.push_back(ftxui::hbox(ftxui::Elements{numEl, colorizeCodeLine(cline, currentLang)}));
+                lineNum++;
+              }
+              elements.push_back(ftxui::text(""));
+              elements.push_back(ftxui::vbox(std::move(codeLines)) | ftxui::border | ftxui::flex);
+              elements.push_back(ftxui::text(""));
+              currentLang.clear();
+            }
+            continue;
+          }
+          if (inCodeBlock) {
+            if (!codeBlockContent.empty()) codeBlockContent += "\n";
+            codeBlockContent += line;
+            continue;
+          }
+          if (isEmptyLine(line)) { elements.push_back(ftxui::text("")); continue; }
+          if (isHorizontalRule(line)) {
+            elements.push_back(ftxui::text(std::string(terminalWidth - 4, '-')) | ftxui::dim);
+            continue;
+          }
+          int headerLevel = getHeaderLevel(line);
+          if (headerLevel > 0) {
+            std::string text = trim(line.substr(headerLevel + 1));
+            ftxui::Element e = ftxui::text(text);
+            if (headerLevel == 1) e = e | ftxui::bold | ftxui::underlined;
+            else e = e | ftxui::bold;
+            elements.push_back(std::move(e));
+            continue;
+          }
+          if (!line.empty() && line[0] == '>') {
+            std::string text = trim(line.substr(1));
+            auto wrapped = wrapText(text, terminalWidth - 3);
+            for (const auto &w : wrapped) {
+              auto e = parseInlineElement(w);
+              elements.push_back(ftxui::hbox({ftxui::text("│ "), e | ftxui::italic, ftxui::filler()}));
+            }
+            continue;
+          }
+          size_t pos = 0;
+          while (pos < line.size() && std::isspace(line[pos])) pos++;
+          if (pos < line.size() && (line[pos] == '-' || line[pos] == '*' || line[pos] == '+')) {
+            int indentLevel = 0;
+            size_t j = 0;
+            while (j < line.size() && std::isspace(line[j])) {
+              if (line[j] == '\t') indentLevel += 2;
+              else indentLevel += 1;
+              j++;
+            }
+            indentLevel = std::min(indentLevel / 2, 4);
+            std::string text = trim(line.substr(j + 1));
+            auto wrapped = wrapText(text, terminalWidth - 4 - indentLevel * 2);
+            const char* bullets[] = {"•", "◦", "▪", "▸", "✦"};
+            std::string indentStr(indentLevel * 2, ' ');
+            for (const auto &w : wrapped) {
+              auto e = parseInlineElement(w);
+              elements.push_back(ftxui::hbox({ftxui::text(indentStr + bullets[indentLevel] + " "), e, ftxui::filler()}));
+            }
+            continue;
+          }
+          auto wrapped = wrapText(line, terminalWidth);
+          for (const auto &w : wrapped) {
+            auto e = parseInlineElement(w);
+            elements.push_back(ftxui::hbox({e, ftxui::filler()}));
+          }
+        }
+        return elements;
+      }
+
+      // 慢速路径：文本含 '|'，可能有表格，需要 vector 做 lookahead 解析。
+      std::vector<std::string> allLines;
+      { std::istringstream stream(markdown); std::string l;
+        while (std::getline(stream, l)) allLines.push_back(std::move(l)); }
       bool inCodeBlock = false;
       std::string codeBlockContent;
       std::string currentLang; // 当前代码块的语言标签
 
-      while (std::getline(stream, line))
-      {
+      for (size_t i = 0; i < allLines.size(); ++i) {
+        const std::string& line = allLines[i];
+
         // Code block handling - preserve formatting, don't wrap
         if (isCodeBlockStart(line))
         {
@@ -651,10 +750,10 @@ namespace aicoder
         }
 
         // List item - 支持嵌套深度，每层缩进
-        size_t i = 0;
-        while (i < line.size() && std::isspace(line[i]))
-          i++;
-        if (i < line.size() && (line[i] == '-' || line[i] == '*' || line[i] == '+'))
+        size_t pos = 0;
+        while (pos < line.size() && std::isspace(line[pos]))
+          pos++;
+        if (pos < line.size() && (line[pos] == '-' || line[pos] == '*' || line[pos] == '+'))
         {
           int indentLevel = 0;
           size_t j = 0;
@@ -675,6 +774,21 @@ namespace aicoder
           }
           continue;
         }
+
+      // Table detection
+      if (!inCodeBlock && aicoder::isTableRow(line)) {
+        auto result = aicoder::parseTableBlock(allLines, i);
+        if (result) {
+          auto& [table, consumed] = *result;
+          auto tableEl = aicoder::renderTable(table, terminalWidth,
+              [](const std::string& s, int w) { return wrapText(s, w); },
+              [](const std::string& s) { return parseInlineElement(s); });
+          elements.push_back(std::move(tableEl));
+          elements.push_back(ftxui::text(""));
+          i += consumed - 1;
+          continue;
+        }
+      }
 
         // Regular paragraph - wrap first, then apply inline formatting
         auto wrapped = wrapText(line, terminalWidth);

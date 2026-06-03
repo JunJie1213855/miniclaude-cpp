@@ -55,6 +55,7 @@ list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/App.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp")
+list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/MarkdownTable.cpp")
 
 add_library(aicoder_core STATIC ${AICODER_LIB_SOURCES})
 target_include_directories(aicoder_core BEFORE PUBLIC
@@ -71,12 +72,14 @@ add_executable(aicoder_tui "${PROJECT_SOURCE_DIR}/src/main.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/App.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ReplView.cpp"
                           "${PROJECT_SOURCE_DIR}/src/ui/ResumePicker.cpp"
-                          "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp")
+                          "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp"
+                          "${PROJECT_SOURCE_DIR}/src/ui/MarkdownTable.cpp")
 target_link_libraries(aicoder_tui PRIVATE aicoder_core ftxui::component)
 target_include_directories(aicoder_tui PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 file(GLOB_RECURSE AICODER_TEST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/tests/*.cpp")
-add_executable(aicoder_tests ${AICODER_TEST_SOURCES})
+add_executable(aicoder_tests ${AICODER_TEST_SOURCES}
+                 "${PROJECT_SOURCE_DIR}/src/ui/MarkdownTable.cpp")
 # GTest (from this environment) injects its own bundled nlohmann/json via -isystem,
 # which can differ from the system header used by aicoder_core and break the ABI on
 # cross-TU functions taking a json parameter. Force the located json include first so
