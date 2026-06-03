@@ -164,6 +164,12 @@ namespace aicoder
 
     void onSubmit(const std::string &input)
     {
+      // /sessions 是 App 级命令：需要访问 SessionStore、cancel token 等，
+      // 无法通过纯函数 CommandRouter 完成，在此直接拦截。
+      if (input == "/sessions") {
+        onSessionsCommand();
+        return;
+      }
       auto outcome = router.handle(input, messages);
       if (outcome.result == CommandResult::Quit)
       {
