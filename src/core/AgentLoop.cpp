@@ -1,5 +1,5 @@
 #include "core/AgentLoop.h"
-#include "core/ToolInterceptor.h"
+#include "core/StreamToolExecutor.h"
 #include "core/Errors.h"
 #include "llm/DefaultLlmClient.h"
 #include <algorithm>
@@ -245,7 +245,7 @@ AgentLoop::QueryLoopResult AgentLoop::query_loop(std::vector<Message>& messages,
   // ③ 工具错误自修:走拦截器。ToolRegistry::invoke 内部把 ToolError
   // 捕获并转 is_error=true,is_error 的 result 通过 messages 推回 LLM;
   // selfCheck_ 开启时每步后追加反思 prompt,引导下一轮先反思。
-  ToolInterceptor interceptor;
+  StreamToolExecutor interceptor;
   interceptor.setMetaLookup([this](const std::string& name) {
     return ToolMeta{name, registry_.needsPermission(name)};
   });
@@ -263,7 +263,8 @@ AgentLoop::QueryLoopResult AgentLoop::query_loop(std::vector<Message>& messages,
       onToolCall_(tu.name, tu.input, r.content, r.is_error);
   });
 
-  auto results = interceptor.intercept(toolUses);
+  for (const auto &tu : toolUses) interceptor.enqueue(tu);
+  auto results = interceptor.run();
   Message toolMsg{Role::Tool, {}};
   for (auto& r : results)
     toolMsg.content.push_back(std::move(r));
