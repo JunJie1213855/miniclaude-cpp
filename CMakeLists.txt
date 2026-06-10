@@ -16,9 +16,28 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_link_options("-Wl,--gc-sections")        # 丢弃未引用 section
   endif()
 endif()
-
+set(CMAKE_CXX_FLAGS "-g -fsanitize=thread -fno-omit-frame-pointer")
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
+
+# --- spdlog ----------------------------------------------------------
+# 系统装好的 header-only 日志库(/usr/include/spdlog),用于写诊断/运行时日志。
+# 用 header-only 模式不链 libspdlog.so,只 include + 模板实例化即可。
+find_package(spdlog QUIET)
+if(NOT spdlog_FOUND)
+  # 回退:用项目内的 find_path 查找头文件
+  find_path(SPDLOG_INCLUDE_DIR spdlog/spdlog.h PATHS /usr/include /usr/local/include)
+  if(NOT SPDLOG_INCLUDE_DIR)
+    message(FATAL_ERROR "spdlog not found. Install libspdlog-dev (header-only).")
+  endif()
+  add_library(spdlog INTERFACE)
+  add_library(spdlog::spdlog_header_only ALIAS spdlog)
+  target_include_directories(spdlog INTERFACE ${SPDLOG_INCLUDE_DIR})
+  # spdlog 1.12 推荐用 C++20 std::format 而不是内置 fmt
+  target_compile_definitions(spdlog INTERFACE SPDLOG_USE_STD_FORMAT)
+endif()
+# 双保险:把宏也直接传给所有 TU,确保任何 #include 顺序都生效
+# (在 aicoder_core add_library 之后才设)
 
 # --- FTXUI -----------------------------------------------------------
 # ftxui 已 vendored 到 third_party/ftxui/(含 CJK 光标修复 + 删测试/示例)。
@@ -58,10 +77,11 @@ list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/Welcome.cpp")
 list(REMOVE_ITEM AICODER_LIB_SOURCES "${PROJECT_SOURCE_DIR}/src/ui/MarkdownTable.cpp")
 
 add_library(aicoder_core STATIC ${AICODER_LIB_SOURCES})
+target_compile_definitions(aicoder_core PUBLIC SPDLOG_USE_STD_FORMAT)
 target_include_directories(aicoder_core BEFORE PUBLIC
   "${PROJECT_SOURCE_DIR}/src"
   "${NLOHMANN_JSON_INCLUDE}")
-target_link_libraries(aicoder_core PUBLIC CURL::libcurl Threads::Threads)
+target_link_libraries(aicoder_core PUBLIC CURL::libcurl Threads::Threads spdlog::spdlog_header_only)
 # PermissionDialog.h is included by sources compiled into aicoder_core and pulls in
 # ftxui/dom/elements.hpp, so FTXUI's include path must reach aicoder_core's own TUs.
 # PUBLIC propagates the include path to aicoder (the only link dependent now).

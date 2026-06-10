@@ -1,6 +1,7 @@
 #include "PermissionDialog.h"
 #include "ftxui/component/component.hpp"
 #include "ftxui/dom/elements.hpp"
+#include "util/Log.h"
 
 #include <string>
 #include <sstream>
@@ -53,6 +54,18 @@ void PermissionDialog::Deny() {
 }
 
 bool PermissionDialog::OnEvent(ftxui::Event event) {
+    // DIAG: 卡住定位日志(临时)
+    const char* evname =
+        (event == ftxui::Event::Escape)    ? "Esc"   :
+        (event == ftxui::Event::Return)    ? "Ret"   :
+        (event == ftxui::Event::ArrowUp)   ? "Up"    :
+        (event == ftxui::Event::ArrowDown) ? "Down"  :
+        (event == ftxui::Event::ArrowLeft) ? "Left"  :
+        (event == ftxui::Event::ArrowRight)? "Right" :
+        (event == ftxui::Event::Tab)       ? "Tab"   :
+        (event.is_mouse())                  ? "Mouse" :
+                                              "Other";
+    AICODER_LOG_DEBUG("PDialog::OnEvent finished={} ev={}", (int)finished_, evname);
     if (finished_) return false;
 
     // Esc 永远意味着"拒绝",先处理(不被 Menu 吞掉)。
@@ -64,11 +77,14 @@ bool PermissionDialog::OnEvent(ftxui::Event event) {
     // 其它事件先让 Menu 处理(↑/↓ 切选项,Enter 确认)。
     // Menu 的 OnEvent 会自己维护 selected_index_;我们 OnRender 时
     // 直接读它,所以无重复状态。
-    if (menu_ && menu_->OnEvent(event))
+    if (menu_ && menu_->OnEvent(event)) {
+      AICODER_LOG_DEBUG("PDialog menu consumed, finished={}", (int)finished_);
       return true;
+    }
 
     // 兜底:Enter 没被 Menu 吃(应该不会)就 Confirm 一次。
     if (event == ftxui::Event::Return) {
+        AICODER_LOG_DEBUG("PDialog fallback Confirm");
         Confirm();
         return true;
     }

@@ -2,6 +2,7 @@
 #include "Welcome.h"
 #include "ui/PermissionDialog.h"
 #include "util/LruCache.h"
+#include "util/Log.h"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/event.hpp"
 #include "ftxui/component/mouse.hpp"
@@ -964,20 +965,37 @@ namespace aicoder
 
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
                                     {
-      if (permissionPending_ && permissionComponent_) {
-        // Modal:全部事件交给 PermissionDialog Component(方向键/Enter/Esc/Tab)。
-        // 它"已 finished"则向上 return false 触发通知流程。
-        // 通过 Maybe 包装的事件自动转发:permissionComponent_->OnEvent
-        // 实际会调到内层 dialog->OnEvent。
-        if (permissionComponent_ && permissionComponent_->OnEvent(e)) {
-          // OnEvent 已处理 → 检查是否已 finished,若是则回写结果并释放 Component。
-          if (auto dlg = std::dynamic_pointer_cast<PermissionDialog>(permissionDialogRaw_)) {
-            if (dlg->Finished()) {
-              grantPermission(dlg->Result());
-              // 释放两个引用 → pending 翻 false → input 重新 Maybe 可见
-              permissionComponent_.reset();
-              permissionDialogRaw_.reset();
-            }
+      if (permissionPending_ && permissionDialogRaw_) {
+        // ★ 修复:Enter/Esc 直接分派,不依赖 PermissionDialog 内部 Menu
+        // OnEvent 链路(menu_ 在 Maybe/inputArea_ 重组后可能焦点丢失,
+        // 导致 OnEvent 不处理 Enter,使 Finished() 永不为 true,死锁 cv.wait)。
+        auto dlg = std::dynamic_pointer_cast<PermissionDialog>(permissionDialogRaw_);
+        if (dlg) {
+          if (e == ftxui::Event::Return) {
+            dlg->Confirm();
+            AICODER_LOG_DEBUG("permission Enter → grant");
+            grantPermission(dlg->Result());
+            permissionComponent_.reset();
+            permissionDialogRaw_.reset();
+            return true;
+          }
+          if (e == ftxui::Event::Escape) {
+            dlg->Deny();
+            AICODER_LOG_DEBUG("permission Esc → deny");
+            grantPermission(dlg->Result());
+            permissionComponent_.reset();
+            permissionDialogRaw_.reset();
+            return true;
+          }
+        }
+        // ↑/↓ 等非终结事件仍走 dialog 的 OnEvent
+        if (permissionDialogRaw_ && permissionDialogRaw_->OnEvent(e)) {
+          AICODER_LOG_DEBUG("permissionDialogRaw consumed event");
+          if (dlg && dlg->Finished()) {
+            AICODER_LOG_DEBUG("dialog Finished result={}", (int)dlg->Result());
+            grantPermission(dlg->Result());
+            permissionComponent_.reset();
+            permissionDialogRaw_.reset();
           }
           return true;
         }
@@ -1064,23 +1082,37 @@ namespace aicoder
 
     void grantPermission(PermissionChoice choice)
     {
-      std::lock_guard<std::mutex> lock(permissionMutex_);
-      permissionResult_ = choice;
-      // AllowForever 通知到 App 层(写 PermissionStore)
-      if (choice == PermissionChoice::AllowForever && allowForeverCallback_)
-        allowForeverCallback_(permissionRequest_.tool_name, permissionRequest_.input);
-      permissionPending_ = false;
-      permissionCv_.notify_one();
-      // 关键:通知 worker 之前,先让 TUI 线程把"input 框已恢复"这一帧
-      // 渲染完,再让出。避免 worker 立即再投递下一个 dialog 抢占键盘。
-      // screen_ 非空(在主会话里)就 Post 一帧重绘事件。
+      // DIAG: 卡住定位日志(临时,确认 bug 后移除)
+      AICODER_LOG_INFO("grantPermission enter choice={}", (int)choice);
+      // 第一步:加锁写结果 + 唤醒 worker + 释放锁。worker 必须能立刻
+      // 拿到 permissionResult_ 继续干活(否则会"权限未授权成功")。
+      {
+        std::lock_guard<std::mutex> lock(permissionMutex_);
+        permissionResult_ = choice;
+        // AllowForever 通知到 App 层(写 PermissionStore)
+        if (choice == PermissionChoice::AllowForever && allowForeverCallback_)
+          allowForeverCallback_(permissionRequest_.tool_name, permissionRequest_.input);
+        permissionPending_ = false;
+        permissionCv_.notify_one();
+        AICODER_LOG_DEBUG("grantPermission cv notified, pending=false");
+      }
+      // 第二步:UI 线程上的清理(dialog 析构 + 重绘)必须**异步**到 task_runner,
+      // **不能在 TUI 线程上 sleep/sync 等待**。
+      //
+      // 历史 bug:之前这里用 sleep_for(30ms) 阻塞 TUI 线程,导致:
+      //   1) Enter 期间 stdin 阻塞无法响应,用户感觉"卡住"
+      //   2) worker 拿到 Allow 后立即执行下一个工具,可能又触发 askPermission
+      //      → 立即投递新 dialog 到 task_runner 队列
+      //   3) TUI 线程 30ms 后醒来,RunOnce 先执行新 dialog lambda,把
+      //      permissionPending_=true,屏幕又弹出新 dialog
+      //   4) 用户感觉"明明按了 Yes,但新 dialog 又出现,权限未授权成功"
+      //
+      // 修复:清理工作投递到 task_runner,让 ftxui 事件循环在下一帧自动
+      // 处理。permissionPending_ 此时已是 false,即使新 dialog 来了,
+      // Maybe.show_() 也会读到最新值(每次 OnRender 都重新调用 lambda)。
       if (screen)
       {
-        screen->PostEvent(ftxui::Event::Custom);
-        // 小延迟让 TUI 事件循环跑一次 render。
-        // 这一行阻塞 TUI 线程约 30ms,对用户来说几乎无感(Enter 后短暂停滞)
-        // 但足以让 input 框可见 1 帧,并丢弃堆积的键盘事件。
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        screen->PostEvent(ftxui::Event::Custom); // 触发一帧重绘
       }
     }
 
@@ -1136,32 +1168,40 @@ namespace aicoder
       req.input = input;
       req.description = input.value("description", std::string{});
 
+      // ★ Root fix:permissionPending_=true 必须在 worker 线程**同步**置位,
+      // 不能放到 UI 线程异步 Post lambda 里。否则 cv.wait 立即读到
+      // pending=false → 谓词 true → wait 立刻返回 → 拿到默认 Deny → 立刻 Deny
+      // (query_loop 之后进入 "工具错误自修" 分支再 sendStream,这就是 user 看到
+      // 的 "query_loop 还在调 LLM API + 默认 Deny")。
+      //
+      // 同时重置 permissionResult_=Deny,避免上一次 Allow 污染当前调用。
+      {
+        std::lock_guard<std::mutex> lock(permissionMutex_);
+        permissionRequest_ = req;
+        permissionResult_ = PermissionChoice::Deny;
+        permissionPending_ = true;
+      }
+
       if (screen)
       {
         auto self = self_.lock();
         if (self)
         {
-          screen->Post([this, req]() mutable
-                       {
-          // 投递到 UI 线程:实例化弹窗、置 pending 标志、强制重绘。
-          permissionRequest_ = req;
-          // 真正弹窗:替换 stub。Container::Tab 的 children 必须稳定(stub_ 槽位),
-          // Make 真正弹窗 + 用 Maybe 包装(pending=true 才可见)。
-          // 加进 inputArea_ 容器,实现物理空间互斥(input 与 dialog
-          // 都进 inputArea_ 的 children,各自 Maybe 控制显隐)。
-          permissionDialogRaw_ = ftxui::Make<PermissionDialog>(permissionRequest_);
-          permissionComponent_ = ftxui::Maybe(
-              permissionDialogRaw_,
-              [this] { return permissionPending_; });
-          if (inputArea_) {
-            inputArea_->DetachAllChildren();
-            inputArea_->Add(ftxui::Maybe(this->input, [this] { return !permissionPending_; }));
-            inputArea_->Add(permissionComponent_);
-          }
-          permissionPending_ = true;
-          // 让 dialog 拿焦点(沿 parent 链通知 active)
-          if (permissionDialogRaw_) permissionDialogRaw_->TakeFocus();
-          screen->PostEvent(ftxui::Event::Custom); });
+          screen->Post([this]() {
+            // UI 线程:只负责 dialog 装配 + 焦点 + 重绘,不再设语义位。
+            permissionDialogRaw_ = ftxui::Make<PermissionDialog>(permissionRequest_);
+            permissionComponent_ = ftxui::Maybe(
+                permissionDialogRaw_,
+                [this] { return permissionPending_; });
+            if (inputArea_) {
+              inputArea_->DetachAllChildren();
+              inputArea_->Add(ftxui::Maybe(this->input, [this] { return !permissionPending_; }));
+              inputArea_->Add(permissionComponent_);
+            }
+            // 让 dialog 拿焦点(沿 parent 链通知 active)
+            if (permissionDialogRaw_) permissionDialogRaw_->TakeFocus();
+            screen->PostEvent(ftxui::Event::Custom);
+          });
         }
       }
 
@@ -1189,6 +1229,8 @@ namespace aicoder
       return;
     }
     auto self = impl_->self_;
+    // ★ 修复 ThreadSanitizer race:PostEvent(Custom) 包进 Post closure 内,
+    // 确保重绘事件在 main 线程投递,避免跨线程读写 ftxui buffer。
     impl_->screen->Post([self, msg = std::move(msg)]()
                         {
     auto p = self.lock();
@@ -1202,8 +1244,9 @@ namespace aicoder
     p->stream_text_.clear();
     p->stream_reasoning_.clear();
     p->thinking_ = false;
-    p->scroll_pos_ = 1.0f; });
-    impl_->screen->PostEvent(ftxui::Event::Custom); // 令帧失效，否则不重绘（见 appendDelta）
+    p->scroll_pos_ = 1.0f;
+    // main 线程投递重绘
+    p->screen->PostEvent(ftxui::Event::Custom); });
   }
 
   void ReplView::clearMessages()
@@ -1217,6 +1260,7 @@ namespace aicoder
       return;
     }
     auto self = impl_->self_;
+    // ★ 修复 ThreadSanitizer race:PostEvent 移到 Post closure 内(在 main 线程执行)
     impl_->screen->Post([self]()
                         {
     auto p = self.lock();
@@ -1225,8 +1269,9 @@ namespace aicoder
     p->stream_text_.clear();
     p->stream_reasoning_.clear();
     p->thinking_ = false;
-    p->scroll_pos_ = 1.0f; });
-    impl_->screen->PostEvent(ftxui::Event::Custom); // 令帧失效触发重绘
+    p->scroll_pos_ = 1.0f;
+    // main 线程投递重绘
+    p->screen->PostEvent(ftxui::Event::Custom); });
   }
 
   void ReplView::appendError(const std::string &msg)
@@ -1245,13 +1290,21 @@ namespace aicoder
     if (!p) return;
     p->stream_text_ += text;
     p->stream_reasoning_ += reasoning;
-    p->scroll_pos_ = 1.0f; });
-    // Post 一个 Closure 只在 UI 线程执行回调，不会令帧失效（frame_valid_ 仍为 true），Draw()
-    // 会早退、屏幕不重绘——必须投递一个 Event 把 frame_valid_ 置 false 才会重绘（空 Closure 不行）。
-    // 但每条增量都投递会导致 O(n²) 重绘洪泛，所以用 redrawQueued_ 合并：仅当当前没有待处理重绘时
-    // 才投递一个 Event；其余增量只累积文本、等这次重绘把标志清掉后再放行下一次。
-    if (!impl_->redrawQueued_.exchange(true))
-      impl_->screen->PostEvent(ftxui::Event::Custom);
+    p->scroll_pos_ = 1.0f;
+    // ★ 修复 ThreadSanitizer race:在 main 线程内部投递重绘事件,
+    // 而不是 worker 线程直接调 screen->PostEvent。
+    // ftxui 的 MultiReceiverBuffer 内部无锁,PostEvent 非线程安全;
+    // Post(closure) 投递到 task_runner 自带锁的队列,等 main 线程消费。
+    // 合并:仅当 redrawQueued_ 未置位时才投递重绘,避免 O(n²) 洪泛。
+    if (!p->redrawQueued_.exchange(true)) {
+      auto screen = p->screen;
+      // 通过 Post 二次排队,确保重绘事件投递在 main 线程执行;
+      // 此时 p->redrawQueued_ 已是 true,后续增量会先累积,等本次
+      // Draw() 消费 PostEvent(Custom) 后再放行下一次重绘。
+      screen->Post([screen]() {
+        screen->PostEvent(ftxui::Event::Custom);
+      });
+    } });
   }
 
   void ReplView::setThinking(bool v)
@@ -1262,6 +1315,8 @@ namespace aicoder
       return;
     }
     auto self = impl_->self_;
+    // ★ 修复 ThreadSanitizer race:把 PostEvent(Custom) 包进 Post closure 内,
+    // 确保在 main 线程投递重绘事件。Post 任务队列自带锁,跨线程安全。
     impl_->screen->Post([self, v]()
                         {
     auto p = self.lock();
@@ -1277,8 +1332,9 @@ namespace aicoder
                 [](const UIMessage& m) { return m.is_thinking; }),
             p->messages_.end());
       }
+      // 在 main 线程投递重绘事件(Closure 内部 PostEvent 是线程安全的)
+      p->screen->PostEvent(ftxui::Event::Custom);
     } });
-    impl_->screen->PostEvent(ftxui::Event::Custom); // 令帧失效，否则不重绘（见 appendDelta）
   }
 
   std::vector<UIMessage> ReplView::messages() const { return impl_->messages_; }

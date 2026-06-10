@@ -29,3 +29,9 @@ pixel-evolution.png
 # User-specific data (session state)
 .aicoder/
 refagent
+
+
+# md
+profile.md
+*.log
+CLAUDE.md
