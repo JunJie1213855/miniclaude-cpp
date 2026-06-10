@@ -14,7 +14,8 @@ namespace aicoder
     virtual ~Provider() = default;
     virtual json encodeRequest(const std::vector<Message> &messages,
                                const std::vector<ToolSpec> &tools,
-                               const std::string &model) const = 0;
+                               const std::string &model,
+                               int maxTokens = 0) const = 0;
     virtual Response decodeResponse(const json &body) const = 0;
   };
 }

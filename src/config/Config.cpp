@@ -96,6 +96,29 @@ namespace aicoder
         throw ConfigError("AICODER_MAX_ITERATIONS 必须是正整数，当前为: " + mi);
     }
 
+    // max_tokens 仅从 env 读取（与 max_iterations 保持一致）。
+    // 0 / 未设置 = 不下发（由服务端用模型默认）；负数 / 非数字 = 报错。
+    {
+      const char *v = std::getenv("AICODER_MAX_TOKENS");
+      if (v && *v)
+      {
+        std::string raw(v);
+        try
+        {
+          size_t pos = 0;
+          c.max_tokens = std::stoi(raw, &pos);
+          if (pos != raw.size())
+            throw std::invalid_argument(raw);
+        }
+        catch (const std::exception &)
+        {
+          throw ConfigError("AICODER_MAX_TOKENS 必须是整数，当前为: " + raw);
+        }
+        if (c.max_tokens < 0)
+          throw ConfigError("AICODER_MAX_TOKENS 不能为负数，当前为: " + raw);
+      }
+    }
+
     return c;
   }
 

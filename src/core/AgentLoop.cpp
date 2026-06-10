@@ -178,98 +178,169 @@ void AgentLoop::injectMaxIterNote(std::vector<Message> &msgs) {
   msgs.push_back(std::move(note));
 }
 
-// ============== 主循环(5 类边界) ==============
+// ============== 主循环(5 类边界,拆为 query / query_loop 两层) ==============
+//
+// 分层:
+//   query_loop: 单轮核心。一次 sendStream → 解析 → 拦截器执行工具 → tool_result
+//               回填 messages。selfCheck 触发的额外模型往返在此层消化。
+//   query:      多轮组装。while(iter<maxIter) 顶端 4 守卫,把 5 类边界都收在这层。
+//   run:        薄壳。try { query } + LlmError 翻译(取消/网络/未知)。
+//
+// 5 类边界归属:
+//   ① 正常终止:query 顶端判 has_tool_use
+//   ② 上下文压缩:query 顶端,在 query_loop 返回**之后**(让 ToolResult 已入历史)
+//   ③ 工具错误自修:query_loop 内部(拦截器 + selfCheck)
+//   ④ 用户取消:query 顶端快查;query_loop 透传 cancel_ 到 sendStream
+//   ⑤ MaxIter 警告:query 的 for 撞上限时注入
+//
+// 关于 selfCheck:不撞 maxIter 时,query_loop 内部可能多走一次 sendStream
+// (反思 prompt 后再调一次)。这条不消耗 query 的 iter,符合原行为。
+// 实际行为举例:selfCheck=true,iter=0 跑完工具→追加 selfCheck prompt→
+// query_loop 内部再调一次 sendStream→若仍 tool_use,query_loop 消化后
+// 返回 has_tool_use=true,query 进入 iter=1。
 
-std::string AgentLoop::run(std::vector<Message>& messages,
-                           const LlmClient::DeltaCallback& onDelta,
-                           const LlmClient::PermissionCallback& onPermission) {
+// ---------- query_loop(单轮核心) ----------
+
+AgentLoop::QueryLoopResult AgentLoop::query_loop(std::vector<Message>& messages,
+                                                 const LlmClient::DeltaCallback& onDelta,
+                                                 const LlmClient::PermissionCallback& onPermission) {
+  QueryLoopResult result;
+  // 取消信号已在 query 顶端快查过;此处不再重复判定(cancel 会经 sendStream
+  // 透传为 LlmError,跑到 run 的 catch 翻译)。
   LlmClient::DeltaCallback cb =
       onDelta ? onDelta : [](const StreamDelta&) {};
   LlmClient::PermissionCallback permCb =
       onPermission ? onPermission : [](const std::string&, const json&) { return true; };
 
+  Response resp;
+  try {
+    // 透传 cancel 到 sendStream(若有)。DefaultLlmClient 暴露
+    // sendStream(...,cancel);基类无 cancel 版本,这里 dynamic_cast 一下。
+    if (auto* d = dynamic_cast<DefaultLlmClient*>(&client_)) {
+      resp = d->sendStream(messages, registry_.specs(), cb, cancel_.get());
+    } else {
+      resp = client_.sendStream(messages, registry_.specs(), cb);
+    }
+  } catch (const LlmError&) {
+    // 取消/网络/未知错误一律抛给 run 翻译,query_loop 不在本层处理。
+    throw;
+  } catch (const std::exception&) {
+    throw;
+  }
+
+  messages.push_back(resp.assistant_message);
+
+  // ① 正常终止:无 tool_use → 直接返回文本
+  std::vector<ToolUseBlock> toolUses;
+  for (const auto& block : resp.assistant_message.content)
+    if (const auto* tu = std::get_if<ToolUseBlock>(&block))
+      toolUses.push_back(*tu);
+
+  result.has_tool_use = !toolUses.empty();
+  result.final_text = assistantText(resp.assistant_message);
+
+  if (toolUses.empty())
+    return result;  // 正常终止的纯文本轮
+
+  // ③ 工具错误自修:走拦截器。ToolRegistry::invoke 内部把 ToolError
+  // 捕获并转 is_error=true,is_error 的 result 通过 messages 推回 LLM;
+  // selfCheck_ 开启时每步后追加反思 prompt,引导下一轮先反思。
+  ToolInterceptor interceptor;
+  interceptor.setMetaLookup([this](const std::string& name) {
+    return ToolMeta{name, registry_.needsPermission(name)};
+  });
+  interceptor.setAsker([&permCb](const ToolUseBlock& tu, const std::string& name) {
+    return permCb(name, tu.input) ? AskResult::Allow : AskResult::Deny;
+  });
+  interceptor.setExecutor([this](const ToolUseBlock& tu) {
+    return registry_.invoke(tu.id, tu.name, tu.input);
+  });
+  interceptor.setBetweenAsksYield([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  });
+  interceptor.setStepReporter([this](const ToolUseBlock& tu, const ToolResultBlock& r) {
+    if (onToolCall_)
+      onToolCall_(tu.name, tu.input, r.content, r.is_error);
+  });
+
+  auto results = interceptor.intercept(toolUses);
+  Message toolMsg{Role::Tool, {}};
+  for (auto& r : results)
+    toolMsg.content.push_back(std::move(r));
+  messages.push_back(std::move(toolMsg));
+
+  if (selfCheck_)
+    messages.push_back(userText(kSelfCheckPrompt));
+
+  return result;
+}
+
+// ---------- query(多轮组装) ----------
+
+void AgentLoop::query(std::vector<Message>& messages,
+                      const LlmClient::DeltaCallback& onDelta,
+                      const LlmClient::PermissionCallback& onPermission) {
   for (int iter = 0; iter < maxIterations_; ++iter) {
     // ④ 循环顶端检查取消
     if (cancelRequested()) {
       messages.push_back(Message{Role::Assistant, {TextBlock{kCancelNote}}});
-      return kCancelNote;
+      return;
     }
 
-    // ② 压缩检查
+    // ② 压缩检查(在 query_loop 返回**之后**才压:让 ToolResult 已入历史)
+    // 注:实际判定的是"上一轮累积后是否超阈",首次进入时 messages 体量正常,
+    // 通常不压;当 iter>=1、累积了 Tool/Assistant/User 多块后才可能触发。
     if (needCompaction(messages))
       compactMessages(messages);
 
-    Response resp;
-    try {
-      // 透传 cancel 到 sendStream(若有)。DefaultLlmClient 暴露
-      // sendStream(...,cancel);基类无 cancel 版本,这里 dynamic_cast 一下。
-      if (auto* d = dynamic_cast<DefaultLlmClient*>(&client_)) {
-        resp = d->sendStream(messages, registry_.specs(), cb, cancel_.get());
-      } else {
-        resp = client_.sendStream(messages, registry_.specs(), cb);
-      }
-    } catch (const LlmError& e) {
-      // ④ 取消导致的 CURLE_ABORTED_BY_CALLBACK 也走这里。
-      const std::string what = e.what();
-      const bool aborted = (what.find("CURLE_ABORTED_BY_CALLBACK") != std::string::npos ||
-                            what.find("aborted") != std::string::npos ||
-                            cancelRequested());
-      const std::string note = aborted ? friendlyCancelError(what)
-                                       : (std::string("[网络中断: ") + what + "]");
-      messages.push_back(Message{Role::Assistant, {TextBlock{note}}});
-      return note;
-    } catch (const std::exception& e) {
-      // 其它非 LlmError(比如 std::bad_alloc 在巨型 messages 上):也不致命
-      const std::string note = std::string("[未知错误: ") + e.what() + "]";
-      messages.push_back(Message{Role::Assistant, {TextBlock{note}}});
-      return note;
-    }
+    QueryLoopResult step = query_loop(messages, onDelta, onPermission);
 
-    messages.push_back(resp.assistant_message);
-
-    // ① 正常终止:无 tool_use → 退出
-    std::vector<ToolUseBlock> toolUses;
-    for (const auto& block : resp.assistant_message.content)
-      if (const auto* tu = std::get_if<ToolUseBlock>(&block))
-        toolUses.push_back(*tu);
-
-    if (toolUses.empty())
-      return assistantText(resp.assistant_message);
-
-    // ③ 工具错误自修:走拦截器。ToolRegistry::invoke 内部把 ToolError
-    // 捕获并转 is_error=true,is_error 的 result 通过 messages 推回 LLM;
-    // selfCheck_ 开启时每步后追加反思 prompt,引导下一轮先反思。
-    ToolInterceptor interceptor;
-    interceptor.setMetaLookup([this](const std::string& name) {
-      return ToolMeta{name, registry_.needsPermission(name)};
-    });
-    interceptor.setAsker([&permCb](const ToolUseBlock& tu, const std::string& name) {
-      return permCb(name, tu.input) ? AskResult::Allow : AskResult::Deny;
-    });
-    interceptor.setExecutor([this](const ToolUseBlock& tu) {
-      return registry_.invoke(tu.id, tu.name, tu.input);
-    });
-    interceptor.setBetweenAsksYield([]() {
-      std::this_thread::sleep_for(std::chrono::milliseconds(60));
-    });
-    interceptor.setStepReporter([this](const ToolUseBlock& tu, const ToolResultBlock& r) {
-      if (onToolCall_)
-        onToolCall_(tu.name, tu.input, r.content, r.is_error);
-    });
-
-    auto results = interceptor.intercept(toolUses);
-    Message toolMsg{Role::Tool, {}};
-    for (auto& r : results)
-      toolMsg.content.push_back(std::move(r));
-    messages.push_back(std::move(toolMsg));
-
-    if (selfCheck_)
-      messages.push_back(userText(kSelfCheckPrompt));
+    // ① 正常终止:无 tool_use → 退出(query 顶端判)
+    if (!step.has_tool_use)
+      return;
   }
 
-  // ⑤ 撞上限:注入警告 + 返回提示文本
+  // ⑤ 撞上限:注入警告(由 run 读取 messages 取文本)
   injectMaxIterNote(messages);
-  return kMaxIterNote;
+}
+
+// ---------- run(薄壳:LlmError 翻译) ----------
+
+std::string AgentLoop::run(std::vector<Message>& messages,
+                           const LlmClient::DeltaCallback& onDelta,
+                           const LlmClient::PermissionCallback& onPermission) {
+  try {
+    query(messages, onDelta, onPermission);
+  } catch (const LlmError& e) {
+    // ④ 取消导致的 CURLE_ABORTED_BY_CALLBACK 也走这里。
+    const std::string what = e.what();
+    const bool aborted = (what.find("CURLE_ABORTED_BY_CALLBACK") != std::string::npos ||
+                          what.find("aborted") != std::string::npos ||
+                          cancelRequested());
+    const std::string note = aborted ? friendlyCancelError(what)
+                                     : (std::string("[网络中断: ") + what + "]");
+    messages.push_back(Message{Role::Assistant, {TextBlock{note}}});
+    return note;
+  } catch (const std::exception& e) {
+    // 其它非 LlmError(比如 std::bad_alloc 在巨型 messages 上):也不致命
+    const std::string note = std::string("[未知错误: ") + e.what() + "]";
+    messages.push_back(Message{Role::Assistant, {TextBlock{note}}});
+    return note;
+  }
+
+  // 正常路径:取最后一条 Assistant 文本(可能是纯文本轮的助手答复,
+  // 也可能是 query 注入的 cancelNote / MaxIterNote)。
+  // 若末尾是 Assistant 消息则取其文本,否则取最后一条 Tool/User 的 final_text 兜底
+  // (实际上 query 顶端注入的 cancelNote / ⑤ 注入的 maxIterNote 都是 Assistant,
+  // 这条分支通常走不到)。
+  for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+    if (it->role == Role::Assistant) {
+      const std::string t = assistantText(*it);
+      if (!t.empty()) return t;
+    }
+  }
+  // 兜底:返回 query_loop 残留的 final_text
+  return {};
 }
 
 std::string AgentLoop::criticReview(const std::vector<Message>& messages) {

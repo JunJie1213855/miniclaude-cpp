@@ -14,9 +14,13 @@ static const char* roleStr(Role r) {
 
 json OpenAIProvider::encodeRequest(const std::vector<Message>& messages,
                                    const std::vector<ToolSpec>& tools,
-                                   const std::string& model) const {
+                                   const std::string& model,
+                                   int maxTokens) const {
   json j;
   j["model"] = model;
+  // max_tokens 透传:0 = 不下发（由服务端用模型默认上限）。
+  // 负数理论上不会到这里（Config 已拦截），但为防御性仍只在 > 0 时写。
+  if (maxTokens > 0) j["max_tokens"] = maxTokens;
   j["messages"] = json::array();
 
   for (const auto& msg : messages) {

@@ -50,11 +50,13 @@ TEST(Config, DefaultsWhenOnlyKeySet) {
   ::unsetenv("AICODER_BASE_URL");
   ::unsetenv("AICODER_MODEL");
   ::unsetenv("AICODER_MAX_ITERATIONS");
+  ::unsetenv("AICODER_MAX_TOKENS");
   Config c = Config::fromEnv(false);
   EXPECT_EQ(c.api_key, "secret");
   EXPECT_EQ(c.base_url, "https://api.deepseek.com/v1");
   EXPECT_EQ(c.model, "deepseek-v4-pro");
   EXPECT_EQ(c.max_iterations, 16);
+  EXPECT_EQ(c.max_tokens, 0);  // 未设置 = 不下发
 }
 
 TEST(Config, OverridesFromEnv) {
@@ -62,10 +64,12 @@ TEST(Config, OverridesFromEnv) {
   ::setenv("AICODER_BASE_URL", "https://x/v1", 1);
   ::setenv("AICODER_MODEL", "qwen-max", 1);
   ::setenv("AICODER_MAX_ITERATIONS", "5", 1);
+  ::setenv("AICODER_MAX_TOKENS", "2048", 1);
   Config c = Config::fromEnv(false);
   EXPECT_EQ(c.base_url, "https://x/v1");
   EXPECT_EQ(c.model, "qwen-max");
   EXPECT_EQ(c.max_iterations, 5);
+  EXPECT_EQ(c.max_tokens, 2048);
 }
 
 TEST(Config, NonNumericMaxIterationsThrows) {
@@ -111,4 +115,26 @@ TEST(Config, SettingsFileNullEnvDoesNotProvideFallback) {
   ::unsetenv("AICODER_MODEL");
   ::unsetenv("AICODER_MAX_ITERATIONS");
   EXPECT_THROW(Config::fromEnv(true), ConfigError);
+}
+
+// ---- max_tokens 解析边界 ----
+
+TEST(Config, MaxTokensZeroIsValid) {
+  // 0 合法 = 不下发(由服务端用默认)
+  ::setenv("AICODER_API_KEY", "secret", 1);
+  ::setenv("AICODER_MAX_TOKENS", "0", 1);
+  Config c = Config::fromEnv(false);
+  EXPECT_EQ(c.max_tokens, 0);
+}
+
+TEST(Config, MaxTokensNegativeThrows) {
+  ::setenv("AICODER_API_KEY", "secret", 1);
+  ::setenv("AICODER_MAX_TOKENS", "-1", 1);
+  EXPECT_THROW(Config::fromEnv(false), ConfigError);
+}
+
+TEST(Config, MaxTokensNonNumericThrows) {
+  ::setenv("AICODER_API_KEY", "secret", 1);
+  ::setenv("AICODER_MAX_TOKENS", "abc", 1);
+  EXPECT_THROW(Config::fromEnv(false), ConfigError);
 }

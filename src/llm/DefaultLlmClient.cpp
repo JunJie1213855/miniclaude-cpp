@@ -32,7 +32,7 @@ namespace aicoder
                                           const DeltaCallback &onDelta,
                                           const std::atomic<bool> *cancel)
   {
-    json reqBody = provider_->encodeRequest(messages, tools, config_.model);
+    json reqBody = provider_->encodeRequest(messages, tools, config_.model, config_.max_tokens);
     reqBody["stream"] = true;
     std::string url = config_.base_url + "/chat/completions";
     std::vector<std::string> headers = {

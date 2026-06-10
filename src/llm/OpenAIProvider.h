@@ -6,7 +6,8 @@ class OpenAIProvider : public Provider {
 public:
   json encodeRequest(const std::vector<Message>& messages,
                      const std::vector<ToolSpec>& tools,
-                     const std::string& model) const override;
+                     const std::string& model,
+                     int maxTokens = 0) const override;
   Response decodeResponse(const json& body) const override;
 };
 }

@@ -81,6 +81,34 @@ namespace aicoder
     // 规划阶段:让模型(不带工具)产出有序步骤列表(解析 JSON {"steps":[...]} 或逐行)。
     std::vector<std::string> planSteps(const std::vector<Message> &messages);
 
+    // ========== query / query_loop 分层抽象(参考 query_learn.md) ==========
+    //
+    // 分层职责:
+    //   query_loop: 单轮核心。一次 sendStream → 解析 Response → 拦截器执行工具
+    //               → tool_result 回填 messages。selfCheck 触发的额外模型往返
+    //               在内部 while 中消化。不做:取消顶端检查、压缩、MaxIter 注入、
+    //               正常终止 return。
+    //   query:      多轮组装。while(iter<maxIter) 顶端 4 守卫(cancel/compaction
+    //               /query_loop/正常终止),把 5 类循环边界都收在这层。
+    //   run:        薄壳。try { query } + LlmError 翻译(取消/网络/未知)。
+    //               wrapper (runWithReflection / runPlanExecute) 继续调 run(),不感知分层。
+    //
+    // query_loop 返回的元信息:query 用来判"还要不要再来一轮"。
+    struct QueryLoopResult
+    {
+      bool has_tool_use = false; // 是否有 tool_use 块(query 用此判正常终止)
+      bool cancelled = false;    // 取消是否在 query_loop 内已被透传
+      std::string final_text;    // 助手最终文本(纯文本轮时填,便于 query 直接透出)
+    };
+
+    QueryLoopResult query_loop(std::vector<Message> &messages,
+                               const LlmClient::DeltaCallback &onDelta,
+                               const LlmClient::PermissionCallback &onPermission);
+
+    void query(std::vector<Message> &messages,
+               const LlmClient::DeltaCallback &onDelta,
+               const LlmClient::PermissionCallback &onPermission);
+
   public:
     // ② 上下文压缩(public 暴露以便单元测试 + 调试 hook)。
     // 策略:保留 system + 最近 kCompactionKeepRecent 条,

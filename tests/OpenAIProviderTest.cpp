@@ -143,3 +143,22 @@ TEST(OpenAIProvider, EncodesToolCallWithReasoningContent) {
   // content should be null when only tool_calls
   EXPECT_TRUE(a["content"].is_null());
 }
+
+// ---- max_tokens 透传 ----
+
+TEST(OpenAIProvider, MaxTokensZeroOmitsField) {
+  // 默认(0)/不传 → 请求体里不包含 max_tokens,由服务端用模型默认上限
+  OpenAIProvider p;
+  std::vector<Message> msgs = {userText("hi")};
+  json req = p.encodeRequest(msgs, {}, "m", /*maxTokens=*/0);
+  EXPECT_FALSE(req.contains("max_tokens"));
+}
+
+TEST(OpenAIProvider, MaxTokensPositiveWritesField) {
+  // max_tokens>0 → 写入请求体
+  OpenAIProvider p;
+  std::vector<Message> msgs = {userText("hi")};
+  json req = p.encodeRequest(msgs, {}, "m", /*maxTokens=*/2048);
+  ASSERT_TRUE(req.contains("max_tokens"));
+  EXPECT_EQ(req["max_tokens"].get<int>(), 2048);
+}
