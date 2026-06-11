@@ -19,6 +19,8 @@
 #include "ui/App.h"
 #include "ui/ResumePicker.h"
 #include "subagent/SubAgentManager.h"
+#include "mcp/McpManager.h"
+#include "mcp/McpTypes.h"
 #include "subagent/SubAgentRegistry.h"
 #include "subagent/SubAgentResultTool.h"
 #include "subagent/SubAgentStatusTool.h"
@@ -82,6 +84,19 @@ int main(int argc, char** argv) {
     registry.registerTool(makeGetSubAgentStatusTool(manager));
     registry.registerTool(makeGetSubAgentResultTool(manager));
   }
+
+  // MCP: connect to configured servers and register their tools
+  std::vector<aicoder::mcp::McpServerConfig> mcpConfigs;
+  for (const auto& [name, raw] : config.mcp_servers) {
+    mcpConfigs.push_back({name, raw.command, raw.args, raw.env, raw.description});
+  }
+  static aicoder::mcp::McpManager mcpManager(std::move(mcpConfigs));
+  if (!config.mcp_servers.empty()) {
+    int n = mcpManager.registerAllTools(registry);
+    fprintf(stderr, "[MCP] registered %d tools from %zu servers\n",
+            n, config.mcp_servers.size());
+  }
+
   CommandRegistry commandReg;
   commandReg.discover(globalDir() / "commands",
                       std::filesystem::current_path() / ".aicoder" / "commands");
@@ -108,6 +123,13 @@ int main(int argc, char** argv) {
     systemPrompt += "\n\n## 子代理后台运行\n- run_sub_agent 支持 run_in_background: true，立即返回 task_id。\n- get_subagent_status(task_id) 查询状态。\n- get_subagent_result(task_id, wait=true) 阻塞取回结果。\n";
   }
   systemPrompt += "\n\n## 资源创建工具\nYou can proactively call create_skill, create_command, create_agent, create_rule during a conversation when you recognize a need for a reusable resource. If body is empty, the system auto-generates content via LLM.\n";
+
+  if (!config.mcp_servers.empty()) {
+    systemPrompt += "\n\n## MCP 工具\n外部 MCP 工具（通过 mcp__<server>__<tool> 调用）:\n";
+    for (const auto& [name, cfg] : config.mcp_servers) {
+      systemPrompt += "- " + name + ": " + cfg.description + "\n";
+    }
+  }
 
   SessionStore sessionStore(globalDir() / "sessions");
   std::string sessionId;
@@ -139,6 +161,7 @@ int main(int argc, char** argv) {
           std::move(initialMessages), config.model);
   app.setSubAgentManager(&manager);
   app.setSubAgentRegistry(&agentReg);
+  // MCP cancel token propagation is handled via SubAgentManager sharing
   app.setSkillRegistry(&skillReg);
   app.run();
   return 0;

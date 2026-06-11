@@ -29,6 +29,50 @@ namespace aicoder
       return std::nullopt;
     }
 
+    // 读取 ~/.aicoder/settings.json 的 "mcp_servers" 对象（若存在），否则返回空。
+    std::map<std::string, McpServerConfigRaw> loadMcpServers()
+    {
+      std::map<std::string, McpServerConfigRaw> result;
+      auto path = globalDir() / "settings.json";
+      auto content = readFile(path);
+      if (!content) return result;
+      try {
+        json j = json::parse(*content);
+        if (!j.contains("mcp_servers") || !j["mcp_servers"].is_object())
+          return result;
+        for (const auto& [name, entry] : j["mcp_servers"].items()) {
+          if (!entry.is_object()) continue;
+          McpServerConfigRaw raw;
+          // command (required)
+          if (entry.contains("command") && entry["command"].is_string())
+            raw.command = entry["command"].get<std::string>();
+          else
+            continue; // skip entries without command
+          // args
+          if (entry.contains("args") && entry["args"].is_array()) {
+            for (const auto& a : entry["args"]) {
+              if (a.is_string())
+                raw.args.push_back(a.get<std::string>());
+            }
+          }
+          // env
+          if (entry.contains("env") && entry["env"].is_object()) {
+            for (const auto& [ek, ev] : entry["env"].items()) {
+              if (ev.is_string())
+                raw.env[ek] = ev.get<std::string>();
+            }
+          }
+          // description (optional)
+          if (entry.contains("description") && entry["description"].is_string())
+            raw.description = entry["description"].get<std::string>();
+          result[name] = std::move(raw);
+        }
+      } catch (const json::exception&) {
+        /* 格式错误就当没有 */
+      }
+      return result;
+    }
+
     // env 变量优先；未设置则回退到 settings["key"]；都没有返回 fallback。
     std::string resolve(const char *envName,
                         const std::optional<json> &settings,
@@ -95,6 +139,9 @@ namespace aicoder
       if (c.max_iterations <= 0)
         throw ConfigError("AICODER_MAX_ITERATIONS 必须是正整数，当前为: " + mi);
     }
+
+    // MCP servers from settings.json
+    c.mcp_servers = loadMcpServers();
 
     // max_tokens 仅从 env 读取（与 max_iterations 保持一致）。
     // 0 / 未设置 = 不下发（由服务端用模型默认）；负数 / 非数字 = 报错。
