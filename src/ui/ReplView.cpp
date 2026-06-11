@@ -16,6 +16,7 @@
 #include <thread>
 #include <mutex>
 #include "ui/MarkdownTable.h"
+#include "core/Message.h"
 #include <condition_variable>
 #include <sstream>
 
@@ -58,6 +59,25 @@ namespace aicoder
       auto ms =
           duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
       return kSpinnerFrames[(ms / kSpinnerPeriodMs) % kSpinnerN];
+    }
+
+    // Agent 活动动画：5 方块波，150ms/帧，挂钟驱动，常驻状态栏
+    constexpr long long kAgentAnimPeriodMs = 150;
+
+    int agentAnimIntensity(int idx) {
+      using namespace std::chrono;
+      auto ms =
+          duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+      int phase = (ms / kAgentAnimPeriodMs) % 5;
+      // 3 增强方块（50→100→200）在 5 个方块上依次右移
+      static const int lut[5][5] = {
+          {50, 100, 200,  0,   0},
+          { 0,  50, 100, 200,  0},
+          { 0,   0,  50, 100, 200},
+          {200,  0,   0,  50, 100},
+          {100, 200,  0,   0,  50},
+      };
+      return lut[phase][idx % 5];
     }
 
     // Simple markdown parser - returns FTXUI Elements
@@ -947,6 +967,24 @@ namespace aicoder
         if (elapsed >= std::chrono::seconds(2))
           ctrlCWarning_ = false;
       }
+      // Agent 活动动画：5 方块波，常驻状态栏。
+      // thinking_ 时走波 + RequestAnimationFrame 驱动；空闲时全 dim 静止。
+      if (thinking_ && screen) screen->RequestAnimationFrame();
+      ftxui::Elements squares;
+      for (int i = 0; i < 5; ++i) {
+        int strength = thinking_ ? agentAnimIntensity(i) : 0;
+        auto sq = ftxui::text("■");
+        if (strength == 200)
+          sq = sq | ftxui::color(ftxui::Color::Cyan) | ftxui::bold | ftxui::inverted;
+        else if (strength == 100)
+          sq = sq | ftxui::color(ftxui::Color::Cyan) | ftxui::bold;
+        else if (strength == 50)
+          sq = sq | ftxui::color(ftxui::Color::Cyan);
+        else
+          sq = sq | ftxui::color(ftxui::Color::Cyan) | ftxui::dim;
+        squares.push_back(std::move(sq));
+      }
+      ftxui::Element animSquares = ftxui::hbox(std::move(squares));
       ftxui::Element modeTag;
       if (ctrlCWarning_) {
         modeTag = ftxui::text(" 如果用户要退出，请再次点击 Ctrl+C ")
@@ -960,7 +998,7 @@ namespace aicoder
       else
         modeTag = ftxui::text(" [普通] Tab切换") | ftxui::dim;
       std::string posTag = " " + std::to_string(nowLine) + "/" + std::to_string(totalLines_) + " ";
-      layout.push_back(ftxui::hbox({ modeTag, ftxui::filler(), ftxui::text(posTag) | ftxui::dim }));  // filler 在右 → 模式靠左、位置靠右
+      layout.push_back(ftxui::hbox({ animSquares, modeTag, ftxui::filler(), ftxui::text(posTag) | ftxui::dim }));
       return ftxui::vbox(std::move(layout)); });
 
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
@@ -1247,6 +1285,74 @@ namespace aicoder
     p->scroll_pos_ = 1.0f;
     // main 线程投递重绘
     p->screen->PostEvent(ftxui::Event::Custom); });
+  }
+
+  void ReplView::appendToolUses(const std::vector<ToolUseBlock> &uses)
+  {
+    if (uses.empty()) return;
+    if (!impl_->screen) {
+      // 无 screen（启动期）:同步路径
+      for (const auto &tu : uses) {
+        std::string args = tu.input.dump();
+        if (args.size() > 500) { args.resize(500); args += "..."; }
+        impl_->messages_.push_back(
+            UIMessage{"⚙ " + tu.name + " " + args, false, false, false, true});
+      }
+      return;
+    }
+    auto self = impl_->self_;
+    auto uses_copy = std::make_shared<std::vector<ToolUseBlock>>(uses); // 拷贝进 closure
+    impl_->screen->Post([self, uses_copy]() {
+      auto p = self.lock();
+      if (!p) return;
+      for (const auto &tu : *uses_copy) {
+        std::string args = tu.input.dump();
+        if (args.size() > 500) args = args.substr(0, 500) + "...";
+        p->messages_.push_back(
+            UIMessage{"⚙ " + tu.name + " " + args, false, false, false, true});
+      }
+      p->scroll_pos_ = 1.0f;
+      p->screen->PostEvent(ftxui::Event::Custom);
+    });
+  }
+
+  // 工具执行完成后的"结果行":接在 appendToolUses 推出的 "⚙" 占位卡片下方,
+  // 让用户能看到调了哪个工具、参数是什么、跑出啥结果(失败/成功区分前缀)。
+  // 由 AgentLoop 的 onToolCall_ 回调从 worker 线程触发 → 走 screen->Post
+  // 把 UI 变更扔回 main 线程,避免和渲染抢锁。
+  void ReplView::appendToolCall(const std::string &name,
+                                const std::string &argsJson,
+                                const std::string &result,
+                                bool isError)
+  {
+    auto build = [&]() {
+      constexpr size_t kArgsMax = 500;
+      constexpr size_t kResultMax = 800;
+      std::string a = argsJson;
+      if (a.size() > kArgsMax) a = a.substr(0, kArgsMax) + "...";
+      std::string r = result;
+      if (r.size() > kResultMax) r = r.substr(0, kResultMax) + "...";
+      const std::string mark = isError ? "✗" : "✓";
+      return UIMessage{mark + " " + name + " " + a + " → " + r,
+                       /*is_user=*/false,
+                       /*is_error=*/isError,
+                       /*is_thinking=*/false,
+                       /*is_tool=*/true};
+    };
+
+    if (!impl_->screen) {
+      // 启动期(还没 setScreen):同步分支,跟 appendToolUses 一致。
+      impl_->messages_.push_back(build());
+      return;
+    }
+    auto self = impl_->self_;
+    impl_->screen->Post([self, msg = build()]() {
+      auto p = self.lock();
+      if (!p) return;
+      p->messages_.push_back(std::move(msg));
+      p->scroll_pos_ = 1.0f;
+      p->screen->PostEvent(ftxui::Event::Custom);
+    });
   }
 
   void ReplView::clearMessages()

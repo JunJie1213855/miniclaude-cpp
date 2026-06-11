@@ -242,6 +242,10 @@ AgentLoop::QueryLoopResult AgentLoop::query_loop(std::vector<Message>& messages,
   if (toolUses.empty())
     return result;  // 正常终止的纯文本轮
 
+  // 工具调用预渲染:在执行前让 UI 先看到 tool_use 块
+  if (onToolUsePreview_)
+    onToolUsePreview_(toolUses);
+
   // ③ 工具错误自修:走拦截器。ToolRegistry::invoke 内部把 ToolError
   // 捕获并转 is_error=true,is_error 的 result 通过 messages 推回 LLM;
   // selfCheck_ 开启时每步后追加反思 prompt,引导下一轮先反思。

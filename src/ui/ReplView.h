@@ -73,6 +73,10 @@ namespace aicoder
     void appendToolCall(const std::string &name, const std::string &argsJson,
                         const std::string &result, bool isError);
 
+    // 工具调用请求展示（**执行前**）：把 assistant_message 中的 tool_use 块作为 ⚙ 行加入，
+    // 让用户看到"消息已收完,准备调工具"的过渡。结果回灌后由 appendToolCall 追加结果行。
+    void appendToolUses(const std::vector<class ToolUseBlock> &uses);
+
   private:
     class Impl;
     std::shared_ptr<Impl> impl_;

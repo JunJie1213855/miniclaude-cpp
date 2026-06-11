@@ -16,7 +16,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_link_options("-Wl,--gc-sections")        # 丢弃未引用 section
   endif()
 endif()
-set(CMAKE_CXX_FLAGS "-g -fsanitize=thread -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer")
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 

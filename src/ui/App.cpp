@@ -439,6 +439,17 @@ namespace aicoder
         replView.appendMessage({outcome.prompt, false, false});
         return;
       }
+      // 拒绝并发提交:上一轮任务未结束时,新输入会与正在跑的任务争抢
+      // ReplView 里的 permissionPending_/permissionResult_(permissionMutex_ 守护)、
+      // 并在 messages_ 上交错追加 user/assistant/tool 块 —— 这就是用户看到
+      // 的"卡住"。Slash 命令(/sessions 等)在此检查之前已 return,不受影响;
+      // onSessionsCommand 自己用 wasRunning 路径处理 mid-task 切换。
+      if (taskRunning_->load()) {
+        replView.appendMessage({"[上一轮任务尚未完成，请等待或先按 Ctrl+C 取消]",
+                                false, false});
+        return;
+      }
+
       messages.push_back(userText(outcome.result == CommandResult::Prompt ? outcome.prompt : input));
       replView.appendMessage({input, true, false});
       replView.setThinking(true);
@@ -451,6 +462,26 @@ namespace aicoder
       std::string sid = sessionId_;
       std::string model = model_;
       auto taskRunning = taskRunning_;
+      // 工具调用预渲染:在 assistant_message 完整收下、interceptor.run 执行**前**触发,
+      // 让 ReplView 先把 ⚙ 工具行显示出来,体现"消息已收完,准备调工具"的过渡。
+      loopPtr->setToolUsePreview([rv](const std::vector<ToolUseBlock>& uses) {
+        rv->appendToolUses(uses);
+      });
+      // 工具执行完成后,AgentLoop 内部 StreamToolExecutor::stepReporter_ 会回调
+      // 这里 → 推一行 "✓/✗ <tool> <args> → <result>" 到 REPL。
+      // 不接这一段的话,execute_one 跑完结果就静默消失,用户在 TUI 上只看到
+      // "⚙ ..." 占位却看不到回执,完全感知不到工具是否真的跑过、跑出啥。
+      // 每次 submit 重新设一次(同 setToolUsePreview),避免跨提交共享闭包。
+      loopPtr->setOnToolCall([rv](const std::string& name, const json& input,
+                                  const std::string& result, bool isError) {
+        rv->appendToolCall(name, input.dump(), result, isError);
+      });
+      // 每次新提交先把 cancel_ 复位。cancel_ 是 App 生命周期共享的
+      // atomic<bool>,在 Ctrl+C 退出、/sessions mid-task、子代理 shutdown 时
+      // 会被置 true,但 AgentLoop::run / query 自身不会复位 —— 如果不主动清,
+      // 下一次 query() 顶端 cancelRequested() 就会立刻 return kCancelNote,
+      // 用户看到的就是"网络中断"(实际是任务从未发起 HTTP 请求)。
+      cancel_->store(false);
       pool.submit([=]() {
       taskRunning->store(true);
       try {

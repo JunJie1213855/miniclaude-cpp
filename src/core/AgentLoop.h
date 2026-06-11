@@ -65,6 +65,11 @@ namespace aicoder
                                                 const std::string &result, bool isError)>;
     void setOnToolCall(ToolCallCallback cb) { onToolCall_ = std::move(cb); }
 
+    // 工具调用预渲染回调:在 LLM 完整消息(含 thinking+text+tool_use)收完、工具执行**前**触发,
+    // 让 UI 能在工具执行前先显示 "⚙ tool_name ..." 行,体现"消息已收完,准备调工具"的过渡。
+    using ToolUsePreviewCallback = std::function<void(const std::vector<ToolUseBlock> &)>;
+    void setToolUsePreview(ToolUsePreviewCallback cb) { onToolUsePreview_ = std::move(cb); }
+
     // 上下文压缩阈值(序列化字节,粗略按 ~4 字符/token 估)。
     // 默认 80 KB,留 16 KB 余量给 96 K context 模型。
     static constexpr size_t kCompactionThresholdBytes = 80 * 1024;
@@ -126,6 +131,7 @@ namespace aicoder
     int maxIterations_;
     bool selfCheck_;
     ToolCallCallback onToolCall_;
+    ToolUsePreviewCallback onToolUsePreview_;
     std::shared_ptr<std::atomic<bool>> cancel_;  // ④ 取消信号
   };
 
