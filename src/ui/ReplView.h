@@ -12,11 +12,18 @@ namespace aicoder
 
   struct UIMessage
   {
+    // 字段顺序是约定:历史调用方用 {text, is_user, is_error, is_thinking, is_tool}
+    // 聚合初始化。fullArgs / fullResult 只能走命名赋值,放在 bool 之后
+    // 不破坏既有调用点。
     std::string text;
     bool is_user = false;
     bool is_error = false;
     bool is_thinking = false; // true for placeholder thinking message
     bool is_tool = false;     // true for a tool-call line (⚙ 工具名 + 参数 + 结果摘要)
+    // 工具调用的完整 argsJson / result(仅 appendToolCall 填,其它类型为空)。
+    // 展开模式(Ctrl+O)下用这些字段画完整内容,默认折叠时只用上面的摘要 text。
+    std::string fullArgs;
+    std::string fullResult;
   };
 
   // 对话模式：Tab 键切换。Normal=普通 run；Reflection=runWithReflection + 每步自检。

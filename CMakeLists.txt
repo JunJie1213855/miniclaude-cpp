@@ -80,7 +80,8 @@ add_library(aicoder_core STATIC ${AICODER_LIB_SOURCES})
 target_compile_definitions(aicoder_core PUBLIC SPDLOG_USE_STD_FORMAT)
 target_include_directories(aicoder_core BEFORE PUBLIC
   "${PROJECT_SOURCE_DIR}/src"
-  "${NLOHMANN_JSON_INCLUDE}")
+  "${NLOHMANN_JSON_INCLUDE}"
+  "${PROJECT_SOURCE_DIR}/third_party")
 target_link_libraries(aicoder_core PUBLIC CURL::libcurl Threads::Threads spdlog::spdlog_header_only)
 # PermissionDialog.h is included by sources compiled into aicoder_core and pulls in
 # ftxui/dom/elements.hpp, so FTXUI's include path must reach aicoder_core's own TUs.

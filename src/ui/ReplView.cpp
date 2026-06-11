@@ -757,6 +757,9 @@ namespace aicoder
     int cursorPos_ = 0;                                         // 绑定到 Input 的光标位置，补全后同步到末尾
     std::chrono::steady_clock::time_point lastCtrlCTime_;
     bool ctrlCWarning_ = false;
+    // Ctrl+O 切换:true 时所有 tool-result 卡片显示完整 args+result,
+    // false(默认)只显示一行摘要。Ctrl+O 在 CatchEvent 里翻转。
+    bool allToolsExpanded_ = false;
     ReplView::ExitRequestedCallback onExitRequested_;
     std::weak_ptr<Impl> self_;
     SubmitCallback onSubmit_;
@@ -876,7 +879,7 @@ namespace aicoder
             }
           }
         } else if (m.is_tool) {
-          // 工具调用行：首行 ⚙ 工具名 + 参数（青色加粗），次行结果摘要（变暗）。
+          // 工具调用行：首行 ⚙/✓ 工具名 + 参数（青色加粗），次行结果摘要（变暗）。
           // text() 不渲染 '\n'，按行拆成 vbox。
           ftxui::Elements toolLines;
           std::istringstream ts(m.text);
@@ -888,6 +891,20 @@ namespace aicoder
                           : (e | ftxui::dim);
             toolLines.push_back(ftxui::hbox({std::move(e), ftxui::filler()}));
             firstLine = false;
+          }
+          // 展开模式:在摘要行后追加完整 args + result(逐行,前缀 "  > ",变暗)。
+          // 仅对结果卡生效:fullResult 非空意味着这是 appendToolCall 推的结果行
+          // (appendToolUses 的 ⚙ 占位行 fullResult 为空,不受影响)。
+          if (allToolsExpanded_ && !m.fullResult.empty()) {
+            for (const std::string& block : {m.fullArgs, m.fullResult}) {
+              if (block.empty()) continue;
+              std::istringstream ss(block);
+              std::string line;
+              while (std::getline(ss, line)) {
+                ftxui::Element e = ftxui::text("  > " + line) | ftxui::dim;
+                toolLines.push_back(ftxui::hbox({std::move(e), ftxui::filler()}));
+              }
+            }
           }
           els.push_back(ftxui::vbox(std::move(toolLines)));
           totalLines_++;  // tool 消息算一行
@@ -997,8 +1014,14 @@ namespace aicoder
                   ftxui::color(ftxui::Color::Cyan);
       else
         modeTag = ftxui::text(" [普通] Tab切换") | ftxui::dim;
+      // 展开模式提示:放进 modeTag 和 filler 之间,默认折叠时不显示避免噪声。
+      ftxui::Element expandHint;
+      if (allToolsExpanded_) {
+        expandHint = ftxui::text(" [Ctrl+O: 折叠] ") | ftxui::bold |
+                     ftxui::color(ftxui::Color::Yellow);
+      }
       std::string posTag = " " + std::to_string(nowLine) + "/" + std::to_string(totalLines_) + " ";
-      layout.push_back(ftxui::hbox({ animSquares, modeTag, ftxui::filler(), ftxui::text(posTag) | ftxui::dim }));
+      layout.push_back(ftxui::hbox({ animSquares, modeTag, expandHint, ftxui::filler(), ftxui::text(posTag) | ftxui::dim }));
       return ftxui::vbox(std::move(layout)); });
 
       component = ftxui::CatchEvent(component, [this](ftxui::Event e)
@@ -1074,6 +1097,14 @@ namespace aicoder
         mode_ = (mode_ == ChatMode::Normal)     ? ChatMode::Reflection
                 : (mode_ == ChatMode::Reflection) ? ChatMode::PlanExecute
                                                   : ChatMode::Normal;
+        return true;
+      }
+      // Ctrl+O:展开/折叠所有 tool-result 卡片。放在 CtrlC 之前,
+      // 让两个全局快捷键挨在一起;permission dialog / completion popup
+      // 在此之前已 early-return,弹窗开着时按 Ctrl+O 自动忽略。
+      if (e == ftxui::Event::CtrlO) {
+        allToolsExpanded_ = !allToolsExpanded_;
+        if (screen) screen->PostEvent(ftxui::Event::Custom);
         return true;
       }
       if (e == ftxui::Event::CtrlC) {
@@ -1333,11 +1364,14 @@ namespace aicoder
       std::string r = result;
       if (r.size() > kResultMax) r = r.substr(0, kResultMax) + "...";
       const std::string mark = isError ? "✗" : "✓";
-      return UIMessage{mark + " " + name + " " + a + " → " + r,
-                       /*is_user=*/false,
-                       /*is_error=*/isError,
-                       /*is_thinking=*/false,
-                       /*is_tool=*/true};
+      UIMessage m;
+      m.text = mark + " " + name + " " + a + " → " + r;
+      m.is_error = isError;
+      m.is_tool = true;
+      // 保留未截断的原文:展开模式(Ctrl+O)下用这些字段画完整内容。
+      m.fullArgs = argsJson;
+      m.fullResult = result;
+      return m;
     };
 
     if (!impl_->screen) {
