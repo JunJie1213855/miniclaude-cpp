@@ -29,11 +29,95 @@
 
 using namespace aicoder;
 
+// 一击即中模式(--system-prompt + --user 同时给时)跑一次 LLM,
+// 流式输出到 stdout,完成后退出。复用 main() 里现有的 base prompt /
+// rules / skills / subagents / MCP 拼接逻辑,用户的 --system-prompt
+// 追加在最后(用户确认的语义)。不进 TUI、不需要 session / command
+// router / FTXUI / AgentLoop —— 单轮、无 tool。
+static int runOneShot(const std::string& extraSystemPrompt,
+                      const std::string& userMessage) {
+  // 1) 配置:和 TUI 一样从环境 / settings.json 拿 API key 等
+  Config config;
+  try {
+    config = Config::fromEnv();
+  } catch (const std::exception& e) {
+    std::cerr << "[错误] 配置加载失败: " << e.what() << "\n";
+    return 1;
+  }
+
+  // 2) 拼 system prompt:复刻 main() 的链路,最后追加用户的额外提示。
+  // 这里的 SkillRegistry / SubAgentRegistry 构造在栈上 —— one-shot
+  // 模式没有 tool execute 闭包来引用它们,不需要 static 延长生命周期。
+  SkillRegistry skillReg;
+  skillReg.discover(globalDir() / "skills",
+                    std::filesystem::current_path() / ".aicoder" / "skills");
+  SubAgentRegistry agentReg;
+  agentReg.discover(globalDir() / "agents",
+                    std::filesystem::current_path() / ".aicoder" / "agents");
+  std::string systemPrompt = buildSystemPrompt(
+      kBaseSystemPrompt,
+      loadRules(globalDir(), std::filesystem::current_path()),
+      skillReg.promptList());
+  if (!agentReg.empty()) {
+    systemPrompt += "\n\n## 可用子代理\n" + agentReg.promptList();
+    systemPrompt += "\n\n## 子代理后台运行\n- run_sub_agent 支持 run_in_background: true，立即返回 task_id。\n- get_subagent_status(task_id) 查询状态。\n- get_subagent_result(task_id, wait=true) 阻塞取回结果。\n";
+  }
+  systemPrompt += "\n\n## 资源创建工具\nYou can proactively call create_skill, create_command, create_agent, create_rule during a conversation when you recognize a need for a reusable resource. If body is empty, the system auto-generates content via LLM.\n";
+  if (!config.mcp_servers.empty()) {
+    systemPrompt += "\n\n## MCP 工具\n外部 MCP 工具（通过 mcp__<server>__<tool> 调用）:\n";
+    for (const auto& [name, cfg] : config.mcp_servers) {
+      systemPrompt += "- " + name + ": " + cfg.description + "\n";
+    }
+  }
+  // 用户的 --system-prompt 追加在拼接链路的最末端 —— 优先级最高,
+  // 能覆盖前面的默认行为(用户确认的语义)。
+  systemPrompt += "\n\n## 用户指定\n" + extraSystemPrompt;
+
+  // 3) 构造 client。HttpTransport 构造里 std::call_once 兜底
+  // curl_global_init,放心 new 多次。
+  DefaultLlmClient client(config,
+                          std::make_unique<OpenAIProvider>(),
+                          std::make_unique<HttpTransport>());
+
+  // 4) 单轮:两 messages,无 tools
+  std::vector<Message> msgs = {
+      systemText(systemPrompt),
+      userText(userMessage),
+  };
+
+  // 5) 流式输出:每次 delta 立刻 flush,管道场景下也能看到打字机效果。
+  try {
+    client.sendStream(msgs, /*tools=*/{}, [](const StreamDelta& d) {
+      if (!d.text.empty()) {
+        std::cout << d.text << std::flush;
+      }
+    });
+    std::cout << "\n";
+    return 0;
+  } catch (const LlmError& e) {
+    std::cerr << "\n[错误] " << e.what() << "\n";
+    return 1;
+  }
+}
+
 int main(int argc, char** argv) {
   auto args = parseCliArgs(argc, argv);
   if (!args) {
     std::cerr << kUsage;
     return 2;
+  }
+
+  // 一击即中模式:同时给了 --system-prompt 和 --user 时进这里,
+  // 不进 TUI、不需要 session / command router / FTXUI。缺一个 flag
+  // → 报配对错误退出 2,沿用 Usage 的 stderr 风格。
+  const bool hasSys  = args->system_prompt.has_value();
+  const bool hasUser = args->user_prompt.has_value();
+  if (hasSys != hasUser) {
+    std::cerr << "[错误] --system-prompt 和 --user 必须配对使用\n" << kUsage;
+    return 2;
+  }
+  if (hasSys && hasUser) {
+    return runOneShot(*args->system_prompt, *args->user_prompt);  // user_prompt 是 optional,解引用已确认有值
   }
 
   // --list-sessions：不进 TUI、不需要 API key，列完即退。删除请手动 rm -rf。
